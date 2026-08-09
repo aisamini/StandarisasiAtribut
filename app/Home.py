@@ -6,13 +6,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pandas as pd
 import streamlit as st
 
-from app.core.rules_manager import get_active_rules_summary
+from app.core.rules_manager import get_ruleset_summary
 from app.core.validator import (
     build_discrepancy_report_excel,
-    run_validation_for_all_categories,
+    run_validation_for_all_data_files,
     save_validation_snapshot,
 )
 
@@ -21,37 +20,24 @@ st.set_page_config(page_title="Validasi Data Spasial IGT P4T", page_icon="🗺�
 st.title("Validasi Data Spasial IGT P4T")
 st.write(
     "Aplikasi untuk memvalidasi atribut data spasial Informasi Geospasial Tematik "
-    "Penatagunaan dan Penguasaan Tanah (IGT P4T) terhadap ruleset standar."
+    "Penatagunaan dan Penguasaan Tanah (IGT P4T) terhadap ruleset standar per IGT "
+    "(nama kolom mengikuti Permen ATR No. 1 Tahun 2025)."
 )
 
-st.subheader("Ringkasan Aturan Aktif")
-summary_df = get_active_rules_summary()
-if summary_df.empty:
-    st.info("Belum ada ruleset aktif. Silakan unggah aturan melalui halaman **Kelola Aturan**.")
-else:
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+st.subheader("Ringkasan Ruleset per IGT")
+ruleset_summary_df = get_ruleset_summary()
+st.dataframe(ruleset_summary_df, use_container_width=True, hide_index=True)
+if (ruleset_summary_df["Status"] == "Belum Ada").any():
+    st.info("Ada IGT yang belum punya ruleset. Unggah lewat halaman **Kelola Aturan**.")
 
 st.divider()
 
 st.subheader("Ringkasan Hasil Validasi Data")
-results, categories_missing_data, categories_missing_rules = run_validation_for_all_categories()
-snapshot_path = save_validation_snapshot(results, categories_missing_data, categories_missing_rules)
-
-if categories_missing_rules:
-    st.warning(
-        "Kategori berikut ditemukan di folder `data/` tetapi **belum punya ruleset "
-        "sama sekali**. Unggah aturan untuk kategori ini di halaman **Kelola Aturan**: "
-        f"{', '.join(categories_missing_rules)}."
-    )
-
-if categories_missing_data:
-    st.info(
-        "Kategori berikut sudah punya ruleset aktif tetapi belum ditemukan file data "
-        f"yang cocok di folder `data/`: {', '.join(categories_missing_data)}."
-    )
+results = run_validation_for_all_data_files()
+snapshot_path = save_validation_snapshot(results)
 
 if not results:
-    st.info("Belum ada hasil validasi. Pastikan ada file data di `data/` yang cocok dengan kategori beruleset aktif.")
+    st.info("Belum ada file data di folder `data/` untuk divalidasi.")
 else:
     st.caption(
         f"Hasil validasi beserta kandidat koreksi disimpan di `output/{snapshot_path.name}` "
@@ -63,66 +49,56 @@ else:
         file_name=f"laporan_diskrepansi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-    for category, result in sorted(results.items()):
-        with st.expander(
-            f"{category}  —  {result.total_records} record  (file: {result.data_file})",
-            expanded=True,
-        ):
-            if not result.attribute_results:
-                st.write("Tidak ada atribut yang bisa dicocokkan untuk kategori ini.")
-            else:
-                summary_rows = []
-                for attribute, attr_result in sorted(result.attribute_results.items()):
-                    summary_rows.append(
-                        {
-                            "Nama_Atribut": attribute,
-                            "Jumlah_Record_Salah": attr_result.error_count,
-                            "Total_Record_Diperiksa": attr_result.total_checked,
-                            "Persentase_Salah": (
-                                f"{attr_result.error_count / attr_result.total_checked:.1%}"
-                                if attr_result.total_checked
-                                else "0.0%"
-                            ),
-                        }
-                    )
-                st.dataframe(
-                    pd.DataFrame(summary_rows), use_container_width=True, hide_index=True
-                )
 
-                for attribute, attr_result in sorted(result.attribute_results.items()):
-                    if not attr_result.invalid_value_counts:
-                        continue
-                    st.caption(f"Nilai tidak valid untuk atribut **{attribute}**:")
+    for result in results:
+        if result.unmatched:
+            with st.expander(f"{result.data_file}  —  {result.total_records} record", expanded=False):
+                st.warning(
+                    "Tidak ada kolom IGT+level yang dikenali di file ini (cek prefix kolom "
+                    "sesuai Permen)."
+                )
+            continue
+
+        with st.expander(f"{result.data_file}  —  {result.total_records} record", expanded=True):
+            for lr in result.level_results:
+                st.markdown(f"**{lr.nama_igt} / Level {lr.level}**")
+
+                if not lr.ruleset_tersedia:
+                    st.warning(
+                        f"IGT '{lr.nama_igt}' belum punya ruleset aktif — seluruh {lr.total_records} "
+                        "record di level ini belum bisa divalidasi. Unggah rulesetnya di "
+                        "halaman **Kelola Aturan**."
+                    )
+                    continue
+
+                persentase = f"{lr.error_count / lr.total_records:.1%}" if lr.total_records else "0.0%"
+                st.write(f"Jumlah record salah: **{lr.error_count}** dari {lr.total_records} ({persentase})")
+
+                if lr.invalid_pair_counts:
                     invalid_rows = []
-                    for value, freq in sorted(
-                        attr_result.invalid_value_counts.items(),
-                        key=lambda kv: kv[1],
-                        reverse=True,
+                    for key, freq in sorted(
+                        lr.invalid_pair_counts.items(), key=lambda kv: kv[1], reverse=True
                     ):
-                        candidates = attr_result.suggestions.get(value, [])
+                        kode, _, nama = key.partition("||")
+                        candidates = lr.suggestions.get(key, [])
                         candidates_str = (
                             ", ".join(
-                                f"{c['nilai']} ({c['skor_persen']}%)" for c in candidates
+                                f"{c['kode']} - {c['nama']} ({c['skor_persen']}%)" for c in candidates
                             )
                             if candidates
                             else "-"
                         )
                         invalid_rows.append(
                             {
-                                "Nilai": value,
+                                "Kode": kode,
+                                "Nama": nama,
                                 "Frekuensi": freq,
                                 "Top-3 Kandidat Pengganti (skor)": candidates_str,
                             }
                         )
-                    st.dataframe(
-                        pd.DataFrame(invalid_rows), use_container_width=True, hide_index=True
-                    )
+                    st.dataframe(invalid_rows, use_container_width=True, hide_index=True)
 
-            if result.attributes_not_in_data:
-                st.warning(
-                    "Atribut berikut ada di ruleset tapi tidak ditemukan kolomnya di data: "
-                    f"{', '.join(result.attributes_not_in_data)}."
-                )
+                st.divider()
 
 st.divider()
 st.write("Gunakan menu di sidebar untuk mengelola aturan atau menjalankan validasi data.")

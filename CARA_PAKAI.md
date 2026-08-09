@@ -40,6 +40,6 @@ Kembali ke jendela Terminal/Command Prompt yang tadi muncul, lalu tekan `Ctrl + 
 ## Halaman-Halaman di Aplikasi
 
 - **Home** — ringkasan aturan dan hasil pengecekan data.
-- **Kelola Aturan** — upload/atur daftar nilai yang dianggap benar per kategori.
-- **Validasi Data** — cek struktur kolom pada file data yang diupload.
+- **Kelola Aturan** — upload/atur daftar nilai yang dianggap benar per IGT (Penggunaan Tanah, Pemanfaatan Tanah, dst).
+- **Validasi Data** — cek apakah kolom pada file data yang diupload dikenali sebagai kolom IGT yang valid.
 - **Koreksi Data** — perbaiki data yang salah lewat pilihan dropdown (tidak perlu ngetik kode).

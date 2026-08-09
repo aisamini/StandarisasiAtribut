@@ -1,51 +1,80 @@
-"""Pengelolaan ruleset atribut IGT P4T: template, validasi, arsip, dan update per kategori."""
+"""Pengelolaan ruleset atribut IGT P4T: template per IGT, validasi upload, arsip, dan ruleset aktif.
+
+Satu file ruleset = satu IGT lengkap (4 level: KC/MN/BS/RI sekaligus), dengan nama
+kolom persis sesuai Permen ATR No. 1 Tahun 2025 (lihat app/core/igt_config.py).
+Upload baru untuk IGT yang sama MENGGANTI SELURUH ruleset IGT itu (bukan digabung).
+"""
 
 from __future__ import annotations
 
 import io
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
-from app.config import (
-    RULES_ACTIVE_DIR,
-    RULES_ARCHIVE_DIR,
-    RULES_METADATA_PATH,
-    TEMPLATE_COLUMNS,
+from app.config import RULES_ACTIVE_DIR, RULES_ARCHIVE_DIR, RULES_METADATA_PATH
+from app.core.igt_config import (
+    LEVELS,
+    get_code_col,
+    get_igt_columns,
+    get_name_col,
+    get_prefix,
+    load_igt_list,
+    slugify,
 )
+
+EXAMPLE_ROW_VALUES = {
+    "KC": ("Contoh Kategori Kecil", "1"),
+    "MN": ("Contoh Kategori Menengah", "1.1"),
+    "BS": ("Contoh Kategori Besar", "1.1.1"),
+    "RI": ("Contoh Kategori Rinci", "1.1.1.1"),
+}
 
 
 class RulesValidationError(Exception):
-    """Dilempar saat file aturan yang diupload tidak sesuai template."""
+    """Dilempar saat file ruleset yang diupload tidak sesuai template IGT terkait."""
 
 
-def _slugify(name: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(name).strip()).strip("_")
-    return slug or "TANPA_KATEGORI"
+def build_template_for_igt(nama_igt: str) -> bytes:
+    """Buat file Excel template untuk satu IGT: 8 kolom baku + 1 baris contoh.
 
+    Melempar ValueError kalau nama_igt tidak terdaftar di konfigurasi.
+    """
+    prefix = get_prefix(nama_igt)
+    if prefix is None:
+        raise ValueError(f"IGT '{nama_igt}' tidak terdaftar di konfigurasi.")
 
-def build_empty_template() -> bytes:
-    """Buat file Excel kosong berisi header sesuai template ruleset."""
-    df = pd.DataFrame(columns=TEMPLATE_COLUMNS)
+    columns = get_igt_columns(prefix)
+    example_row = {}
+    for level in LEVELS:
+        nama_contoh, kode_contoh = EXAMPLE_ROW_VALUES[level]
+        example_row[get_name_col(prefix, level)] = nama_contoh
+        example_row[get_code_col(prefix, level)] = kode_contoh
+
+    df = pd.DataFrame([example_row], columns=columns)
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Aturan")
+        df.to_excel(writer, index=False, sheet_name="Ruleset")
     buffer.seek(0)
     return buffer.getvalue()
 
 
-def validate_columns(df: pd.DataFrame) -> None:
-    """Pastikan kolom file yang diupload persis sesuai template.
+def validate_ruleset_columns(df: pd.DataFrame, nama_igt: str) -> None:
+    """Pastikan kolom file yang diupload persis sesuai 8 kolom baku IGT tsb (case-sensitive).
 
     Melempar RulesValidationError dengan pesan jelas jika tidak sesuai.
     """
+    prefix = get_prefix(nama_igt)
+    if prefix is None:
+        raise RulesValidationError(f"IGT '{nama_igt}' tidak terdaftar di konfigurasi.")
+
+    expected_columns = get_igt_columns(prefix)
     actual_columns = list(df.columns)
 
-    missing = [c for c in TEMPLATE_COLUMNS if c not in actual_columns]
-    extra = [c for c in actual_columns if c not in TEMPLATE_COLUMNS]
+    missing = [c for c in expected_columns if c not in actual_columns]
+    extra = [c for c in actual_columns if c not in expected_columns]
 
     if missing or extra:
         parts = []
@@ -54,25 +83,13 @@ def validate_columns(df: pd.DataFrame) -> None:
         if extra:
             parts.append(f"kolom tidak dikenal: {', '.join(extra)}")
         raise RulesValidationError(
-            "File tidak sesuai template. Kolom yang diharapkan: "
-            f"{', '.join(TEMPLATE_COLUMNS)}. Ditemukan {', '.join(parts)}. "
+            f"File tidak sesuai template IGT '{nama_igt}'. Kolom yang diharapkan (persis, "
+            f"case-sensitive): {', '.join(expected_columns)}. Ditemukan {', '.join(parts)}. "
             "Silakan unduh ulang template dan sesuaikan file Anda."
         )
 
-    if actual_columns[: len(TEMPLATE_COLUMNS)] != TEMPLATE_COLUMNS:
-        raise RulesValidationError(
-            "Urutan kolom tidak sesuai template. Urutan yang diharapkan: "
-            f"{', '.join(TEMPLATE_COLUMNS)}."
-        )
-
     if df.empty:
-        raise RulesValidationError("File aturan kosong, tidak ada baris data untuk disimpan.")
-
-    if df["Kategori_IGT"].isna().any() or (df["Kategori_IGT"].astype(str).str.strip() == "").any():
-        raise RulesValidationError("Ada baris dengan Kategori_IGT kosong. Lengkapi terlebih dahulu.")
-
-    if df["Nama_Atribut"].isna().any() or (df["Nama_Atribut"].astype(str).str.strip() == "").any():
-        raise RulesValidationError("Ada baris dengan Nama_Atribut kosong. Lengkapi terlebih dahulu.")
+        raise RulesValidationError("File ruleset kosong, tidak ada baris data untuk disimpan.")
 
 
 def _load_metadata() -> dict:
@@ -87,96 +104,117 @@ def _save_metadata(metadata: dict) -> None:
     )
 
 
-def save_archive_copy(uploaded_bytes: bytes, original_filename: str) -> Path:
-    """Simpan salinan arsip file yang diupload dengan nama bertimestamp."""
+def save_archive_copy(uploaded_bytes: bytes, nama_igt: str, original_filename: str) -> Path:
+    """Simpan salinan arsip file yang diupload, nama file bertimestamp + nama IGT."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = Path(original_filename).suffix or ".xlsx"
-    stem = Path(original_filename).stem
-    archive_name = f"{timestamp}_{_slugify(stem)}{suffix}"
+    archive_name = f"{timestamp}_{slugify(nama_igt)}{suffix}"
     archive_path = RULES_ARCHIVE_DIR / archive_name
     archive_path.write_bytes(uploaded_bytes)
     return archive_path
 
 
-def update_active_rules(df: pd.DataFrame) -> list[str]:
-    """Update rules/active/ hanya untuk kategori yang ada di df.
+def _count_valid_rows(df: pd.DataFrame, prefix: str, level: str) -> int:
+    """Jumlah baris yang punya pasangan nama+kode terisi (bukan kosong) untuk satu level."""
+    name_col, code_col = get_name_col(prefix, level), get_code_col(prefix, level)
+    nama = df[name_col].astype(str).str.strip()
+    kode = df[code_col].astype(str).str.strip()
+    filled = df[name_col].notna() & df[code_col].notna() & (nama != "") & (kode != "") & (nama != "nan") & (kode != "nan")
+    return int(filled.sum())
 
-    Kategori lain yang sudah ada di rules/active tidak disentuh.
-    Mengembalikan daftar kategori yang diperbarui.
+
+def update_active_ruleset(nama_igt: str, df: pd.DataFrame) -> Path:
+    """Timpa seluruh ruleset aktif untuk satu IGT dengan isi df (4 level sekaligus).
+
+    Ruleset IGT lain di rules/active/ tidak disentuh.
     """
+    prefix = get_prefix(nama_igt)
+    if prefix is None:
+        raise RulesValidationError(f"IGT '{nama_igt}' tidak terdaftar di konfigurasi.")
+
+    active_path = RULES_ACTIVE_DIR / f"{slugify(nama_igt)}.csv"
+    df.to_csv(active_path, index=False, encoding="utf-8")
+
     metadata = _load_metadata()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    updated_categories: list[str] = []
-    for category, group in df.groupby("Kategori_IGT"):
-        category = str(category).strip()
-        category_df = group[TEMPLATE_COLUMNS].reset_index(drop=True)
-
-        active_path = RULES_ACTIVE_DIR / f"{_slugify(category)}.csv"
-        category_df.to_csv(active_path, index=False, encoding="utf-8")
-
-        metadata[category] = {
-            "file": active_path.name,
-            "last_updated": now_str,
-            "jumlah_atribut": len(category_df),
-        }
-        updated_categories.append(category)
-
+    metadata[nama_igt] = {
+        "file": active_path.name,
+        "prefix": prefix,
+        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "jumlah_baris": {level: _count_valid_rows(df, prefix, level) for level in LEVELS},
+    }
     _save_metadata(metadata)
-    return updated_categories
+    return active_path
 
 
-def get_active_rules_summary() -> pd.DataFrame:
-    """Tabel ringkasan aturan aktif per kategori beserta tanggal update terakhir."""
+def load_active_ruleset(nama_igt: str) -> pd.DataFrame | None:
+    """Muat ruleset aktif (wide, 8 kolom) untuk satu IGT, atau None kalau belum ada."""
     metadata = _load_metadata()
-    rows = []
-    for category, info in metadata.items():
-        rows.append(
-            {
-                "Kategori_IGT": category,
-                "Jumlah_Atribut": info.get("jumlah_atribut", 0),
-                "Terakhir_Diupdate": info.get("last_updated", "-"),
-                "File": info.get("file", "-"),
-            }
-        )
-    if not rows:
-        return pd.DataFrame(columns=["Kategori_IGT", "Jumlah_Atribut", "Terakhir_Diupdate", "File"])
-    return pd.DataFrame(rows).sort_values("Kategori_IGT").reset_index(drop=True)
-
-
-def load_active_rules_for_category(category: str) -> pd.DataFrame:
-    """Muat ruleset aktif untuk satu kategori tertentu."""
-    metadata = _load_metadata()
-    info = metadata.get(category)
+    info = metadata.get(nama_igt)
     if not info:
-        return pd.DataFrame(columns=TEMPLATE_COLUMNS)
+        return None
     path = RULES_ACTIVE_DIR / info["file"]
     if not path.exists():
-        return pd.DataFrame(columns=TEMPLATE_COLUMNS)
-    return pd.read_csv(path)
+        return None
+    return pd.read_csv(path, dtype=str)
 
 
-def get_expected_attributes(category: str) -> list[str]:
-    """Daftar nama atribut yang diharapkan (kolom wajib) untuk satu kategori IGT."""
-    rules_df = load_active_rules_for_category(category)
-    if rules_df.empty:
-        return []
-    return sorted(rules_df["Nama_Atribut"].dropna().astype(str).str.strip().unique().tolist())
+def _extract_valid_pairs(df: pd.DataFrame, prefix: str, level: str) -> set[tuple[str, str]]:
+    """Set pasangan (kode, nama) yang terisi lengkap pada df ruleset untuk satu level."""
+    name_col, code_col = get_name_col(prefix, level), get_code_col(prefix, level)
+    if name_col not in df.columns or code_col not in df.columns:
+        return set()
+
+    pairs: set[tuple[str, str]] = set()
+    for kode, nama in zip(df[code_col], df[name_col]):
+        kode_str = "" if pd.isna(kode) else str(kode).strip()
+        nama_str = "" if pd.isna(nama) else str(nama).strip()
+        if kode_str and nama_str:
+            pairs.add((kode_str, nama_str))
+    return pairs
 
 
-def get_active_categories() -> list[str]:
-    """Daftar kategori IGT yang memiliki ruleset aktif."""
-    return sorted(_load_metadata().keys())
+def get_valid_pairs(nama_igt: str, level: str) -> set[tuple[str, str]] | None:
+    """Set pasangan (kode, nama) valid untuk satu IGT+level, atau None kalau IGT belum punya ruleset."""
+    df = load_active_ruleset(nama_igt)
+    if df is None:
+        return None
+    prefix = get_prefix(nama_igt)
+    return _extract_valid_pairs(df, prefix, level)
 
 
-def load_all_active_rules() -> pd.DataFrame:
-    """Muat seluruh ruleset aktif dari semua kategori menjadi satu DataFrame."""
+def build_ruleset_lookup(igt_list: list[dict] | None = None) -> dict[str, dict[str, set[tuple[str, str]]]]:
+    """{nama_igt: {level: {(kode, nama), ...}}} — hanya untuk IGT yang sudah punya ruleset aktif."""
+    igt_list = igt_list if igt_list is not None else load_igt_list()
+    lookup: dict[str, dict[str, set[tuple[str, str]]]] = {}
+    for item in igt_list:
+        nama_igt, prefix = item["nama_igt"], item["prefix"]
+        df = load_active_ruleset(nama_igt)
+        if df is None:
+            continue
+        lookup[nama_igt] = {level: _extract_valid_pairs(df, prefix, level) for level in LEVELS}
+    return lookup
+
+
+def get_ruleset_summary(igt_list: list[dict] | None = None) -> pd.DataFrame:
+    """Tabel ringkasan ruleset per IGT: status, jumlah baris per level, terakhir diupdate."""
+    igt_list = igt_list if igt_list is not None else load_igt_list()
     metadata = _load_metadata()
-    frames = []
-    for category, info in metadata.items():
-        path = RULES_ACTIVE_DIR / info["file"]
-        if path.exists():
-            frames.append(pd.read_csv(path))
-    if not frames:
-        return pd.DataFrame(columns=TEMPLATE_COLUMNS)
-    return pd.concat(frames, ignore_index=True)
+
+    rows = []
+    for item in igt_list:
+        nama_igt, prefix = item["nama_igt"], item["prefix"]
+        info = metadata.get(nama_igt)
+        jumlah = info.get("jumlah_baris", {}) if info else {}
+        rows.append(
+            {
+                "Nama_IGT": nama_igt,
+                "Prefix": prefix,
+                "Status": "Ada" if info else "Belum Ada",
+                "Baris_KC": jumlah.get("KC", 0),
+                "Baris_MN": jumlah.get("MN", 0),
+                "Baris_BS": jumlah.get("BS", 0),
+                "Baris_RI": jumlah.get("RI", 0),
+                "Terakhir_Diupdate": info.get("last_updated", "-") if info else "-",
+            }
+        )
+    return pd.DataFrame(rows)

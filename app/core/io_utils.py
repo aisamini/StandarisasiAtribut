@@ -149,13 +149,15 @@ DBF_CHAR_FIELD_MAX_LEN = 254
 def _infer_dbf_field_specs(df: pd.DataFrame) -> list[tuple[str, str, int, int]]:
     """Tentukan spesifikasi field DBF (nama, tipe, size, decimal) dari dtype tiap kolom.
 
-    Nama field dipangkas maks 10 karakter (batas format DBF) dan dibuat unik.
+    Nama field dipangkas maks 10 karakter (batas format DBF) dan dibuat unik. Huruf
+    besar/kecil pada nama kolom TIDAK diubah — nama kolom IGT P4T bersifat
+    case-sensitive (mis. 'ptnObjKC' vs 'idptnObjKC') sesuai Permen ATR No. 1 Tahun 2025.
     """
     specs: list[tuple[str, str, int, int]] = []
     used_names: set[str] = set()
 
     for column in df.columns:
-        base_name = str(column).strip().upper()[:DBF_FIELD_NAME_MAX_LEN] or "COL"
+        base_name = str(column).strip()[:DBF_FIELD_NAME_MAX_LEN] or "COL"
         name = base_name
         counter = 1
         while name in used_names:

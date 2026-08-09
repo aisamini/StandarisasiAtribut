@@ -1,0 +1,20 @@
+{
+  "igt_list": [
+    {
+      "nama_igt": "Penggunaan Tanah",
+      "prefix": "ptn"
+    },
+    {
+      "nama_igt": "Pemanfaatan Tanah",
+      "prefix": "pfn"
+    },
+    {
+      "nama_igt": "Pemilikan Tanah",
+      "prefix": "pmn"
+    },
+    {
+      "nama_igt": "Penguasaan Tanah",
+      "prefix": "psn"
+    }
+  ]
+}
