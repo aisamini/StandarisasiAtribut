@@ -8,7 +8,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import streamlit as st
 
 from app.config import OUTPUT_DIR
-from app.core.io_utils import DataReadError, DataWriteError, read_attribute_table, write_attribute_table
+from app.core.io_utils import (
+    DataReadError,
+    DataWriteError,
+    export_attribute_table_bytes,
+    read_attribute_table,
+    write_attribute_table,
+)
 from app.core.rules_manager import _slugify, get_active_categories
 from app.core.validator import (
     _find_data_file_for_category,
@@ -50,6 +56,18 @@ lookup = build_rules_lookup()
 invalid_records = get_invalid_records(df, category, lookup)
 
 st.caption(f"File data: `{data_path.name}` — {len(df)} record total.")
+
+export_suffix = ".dbf" if data_path.suffix.lower() in (".dbf", ".shp") else ".csv"
+try:
+    export_bytes = export_attribute_table_bytes(df, export_suffix)
+    st.download_button(
+        label=f"Download Data Terkoreksi ({export_suffix})",
+        data=export_bytes,
+        file_name=f"{_slugify(category)}_terkoreksi{export_suffix}",
+        mime="application/octet-stream",
+    )
+except DataWriteError as exc:
+    st.error(f"Gagal menyiapkan file unduhan: {exc}")
 
 if not invalid_records:
     st.success(f"Tidak ada record salah untuk kategori **{category}**. Semua nilai atribut sudah valid.")

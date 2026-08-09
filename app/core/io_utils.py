@@ -4,9 +4,11 @@ serta validasi struktur kolom dasarnya terhadap daftar kolom yang diharapkan.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pandas as pd
+import shapefile
 from dbfread import DBF, DBFNotFound
 
 
@@ -140,12 +142,86 @@ def write_csv(path: str | Path, df: pd.DataFrame) -> Path:
     return path
 
 
-def write_attribute_table(path: str | Path, df: pd.DataFrame) -> Path:
-    """Tulis DataFrame kembali ke file sesuai format aslinya.
+DBF_FIELD_NAME_MAX_LEN = 10
+DBF_CHAR_FIELD_MAX_LEN = 254
 
-    Hanya .csv yang didukung untuk ditulis langsung. Untuk .dbf/.shp,
-    melempar DataWriteError dengan pesan jelas — pemanggil disarankan
-    menyimpan hasil koreksi sebagai file .csv baru sebagai gantinya.
+
+def _infer_dbf_field_specs(df: pd.DataFrame) -> list[tuple[str, str, int, int]]:
+    """Tentukan spesifikasi field DBF (nama, tipe, size, decimal) dari dtype tiap kolom.
+
+    Nama field dipangkas maks 10 karakter (batas format DBF) dan dibuat unik.
+    """
+    specs: list[tuple[str, str, int, int]] = []
+    used_names: set[str] = set()
+
+    for column in df.columns:
+        base_name = str(column).strip().upper()[:DBF_FIELD_NAME_MAX_LEN] or "COL"
+        name = base_name
+        counter = 1
+        while name in used_names:
+            suffix = str(counter)
+            name = f"{base_name[: DBF_FIELD_NAME_MAX_LEN - len(suffix)]}{suffix}"
+            counter += 1
+        used_names.add(name)
+
+        series = df[column]
+        if pd.api.types.is_bool_dtype(series.dtype):
+            specs.append((name, "L", 1, 0))
+        elif pd.api.types.is_integer_dtype(series.dtype):
+            specs.append((name, "N", 18, 0))
+        elif pd.api.types.is_float_dtype(series.dtype):
+            specs.append((name, "N", 19, 4))
+        else:
+            lengths = series.dropna().astype(str).map(len)
+            max_len = int(lengths.max()) if not lengths.empty else 1
+            size = max(1, min(max_len, DBF_CHAR_FIELD_MAX_LEN))
+            specs.append((name, "C", size, 0))
+
+    return specs
+
+
+def write_dbf(path: str | Path, df: pd.DataFrame) -> Path:
+    """Tulis DataFrame ke file .dbf, tipe field disimpulkan otomatis dari dtype kolom.
+
+    Melempar DataWriteError jika penulisan gagal (mis. tabel kosong tanpa kolom).
+    """
+    path = Path(path)
+    if df.empty and len(df.columns) == 0:
+        raise DataWriteError("Tidak bisa menulis DBF: DataFrame tidak memiliki kolom.")
+
+    specs = _infer_dbf_field_specs(df)
+
+    try:
+        with shapefile.Writer(dbf=str(path)) as writer:
+            for name, ftype, size, decimal in specs:
+                writer.field(name, ftype, size=size, decimal=decimal)
+
+            for _, row in df.iterrows():
+                record = {}
+                for column, (name, ftype, size, decimal) in zip(df.columns, specs):
+                    value = row[column]
+                    if pd.isna(value):
+                        record[name] = None
+                    elif ftype == "N":
+                        record[name] = float(value) if decimal else int(value)
+                    elif ftype == "L":
+                        record[name] = bool(value)
+                    else:
+                        record[name] = str(value)[:size]
+                # Pakai keyword args: pyshp mengubah nilai None jadi field kosong hanya
+                # lewat jalur ini (bukan lewat argumen posisional).
+                writer.record(**record)
+    except Exception as exc:  # noqa: BLE001
+        raise DataWriteError(f"Gagal menulis file DBF '{path.name}': {exc}") from exc
+
+    return path
+
+
+def write_attribute_table(path: str | Path, df: pd.DataFrame) -> Path:
+    """Tulis DataFrame kembali ke file sesuai format aslinya (.csv, .dbf, atau .shp).
+
+    Untuk .shp, hanya file .dbf pendamping yang ditulis ulang — geometri (.shp/.shx)
+    tidak diubah karena koreksi hanya menyentuh nilai atribut, bukan geometri.
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -153,7 +229,35 @@ def write_attribute_table(path: str | Path, df: pd.DataFrame) -> Path:
     if suffix == ".csv":
         return write_csv(path, df)
 
+    if suffix == ".dbf":
+        return write_dbf(path, df)
+
+    if suffix == ".shp":
+        return write_dbf(path.with_suffix(".dbf"), df)
+
     raise DataWriteError(
         f"Menyimpan langsung ke format '{suffix}' belum didukung. "
-        "Simpan hasil koreksi sebagai file .csv baru sebagai gantinya."
+        f"Format yang didukung: .csv, .dbf, .shp (menulis .dbf pendamping)."
     )
+
+
+def export_attribute_table_bytes(df: pd.DataFrame, suffix: str) -> bytes:
+    """Tulis DataFrame ke file sementara (.csv atau .dbf) lalu kembalikan isinya sebagai bytes.
+
+    Dipakai untuk membuat konten tombol download Streamlit (mis. hasil koreksi)
+    tanpa perlu menyimpan file permanen di disk. Untuk data yang berasal dari
+    shapefile (.shp), export sebagai .dbf karena geometri (.shp/.shx) tidak
+    diubah oleh proses koreksi atribut.
+    """
+    suffix = suffix.lower()
+    if not suffix.startswith("."):
+        suffix = f".{suffix}"
+    if suffix == ".shp":
+        suffix = ".dbf"
+    if suffix not in (".csv", ".dbf"):
+        raise DataWriteError(f"Format export '{suffix}' tidak didukung untuk unduhan langsung.")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir) / f"export{suffix}"
+        write_attribute_table(tmp_path, df)
+        return tmp_path.read_bytes()

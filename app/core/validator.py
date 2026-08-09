@@ -6,6 +6,7 @@ di data/ dicocokkan ke kategori yang sesuai berdasarkan nama file.
 
 from __future__ import annotations
 
+import io
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -278,3 +279,108 @@ def load_validation_snapshot(path: Path | None = None) -> dict | None:
     if not target_path.exists():
         return None
     return json.loads(target_path.read_text(encoding="utf-8"))
+
+
+def build_discrepancy_report_excel(
+    results: dict[str, CategoryValidationResult],
+) -> bytes:
+    """Susun laporan ringkasan statistik diskrepansi hasil validasi jadi file Excel.
+
+    Berisi 3 sheet:
+      - Ringkasan: total record, jumlah atribut bermasalah, dan total nilai salah per kategori.
+      - Detail_Per_Atribut: jumlah & persentase record salah per atribut per kategori.
+      - Nilai_Tidak_Valid: tiap unique nilai salah, frekuensinya, dan top-3 kandidat pengganti.
+    """
+    ringkasan_rows = []
+    detail_rows = []
+    invalid_rows = []
+
+    for category, result in sorted(results.items()):
+        total_errors = sum(ar.error_count for ar in result.attribute_results.values())
+        attributes_with_errors = sum(
+            1 for ar in result.attribute_results.values() if ar.error_count > 0
+        )
+        ringkasan_rows.append(
+            {
+                "Kategori_IGT": category,
+                "File_Data": result.data_file,
+                "Total_Record": result.total_records,
+                "Jumlah_Atribut_Diperiksa": len(result.attribute_results),
+                "Jumlah_Atribut_Bermasalah": attributes_with_errors,
+                "Total_Nilai_Salah": total_errors,
+            }
+        )
+
+        for attribute, attr_result in sorted(result.attribute_results.items()):
+            detail_rows.append(
+                {
+                    "Kategori_IGT": category,
+                    "Nama_Atribut": attribute,
+                    "Jumlah_Record_Salah": attr_result.error_count,
+                    "Total_Record_Diperiksa": attr_result.total_checked,
+                    "Persentase_Salah": (
+                        round(attr_result.error_count / attr_result.total_checked * 100, 2)
+                        if attr_result.total_checked
+                        else 0.0
+                    ),
+                }
+            )
+
+            for value, freq in sorted(
+                attr_result.invalid_value_counts.items(), key=lambda kv: kv[1], reverse=True
+            ):
+                candidates = attr_result.suggestions.get(value, [])
+                candidates_str = (
+                    "; ".join(f"{c['nilai']} ({c['skor_persen']}%)" for c in candidates)
+                    if candidates
+                    else "-"
+                )
+                invalid_rows.append(
+                    {
+                        "Kategori_IGT": category,
+                        "Nama_Atribut": attribute,
+                        "Nilai_Tidak_Valid": value,
+                        "Frekuensi": freq,
+                        "Top3_Kandidat_Pengganti": candidates_str,
+                    }
+                )
+
+    ringkasan_df = pd.DataFrame(
+        ringkasan_rows,
+        columns=[
+            "Kategori_IGT",
+            "File_Data",
+            "Total_Record",
+            "Jumlah_Atribut_Diperiksa",
+            "Jumlah_Atribut_Bermasalah",
+            "Total_Nilai_Salah",
+        ],
+    )
+    detail_df = pd.DataFrame(
+        detail_rows,
+        columns=[
+            "Kategori_IGT",
+            "Nama_Atribut",
+            "Jumlah_Record_Salah",
+            "Total_Record_Diperiksa",
+            "Persentase_Salah",
+        ],
+    )
+    invalid_df = pd.DataFrame(
+        invalid_rows,
+        columns=[
+            "Kategori_IGT",
+            "Nama_Atribut",
+            "Nilai_Tidak_Valid",
+            "Frekuensi",
+            "Top3_Kandidat_Pengganti",
+        ],
+    )
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        ringkasan_df.to_excel(writer, index=False, sheet_name="Ringkasan")
+        detail_df.to_excel(writer, index=False, sheet_name="Detail_Per_Atribut")
+        invalid_df.to_excel(writer, index=False, sheet_name="Nilai_Tidak_Valid")
+    buffer.seek(0)
+    return buffer.getvalue()

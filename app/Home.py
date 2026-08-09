@@ -1,6 +1,7 @@
 """Halaman utama aplikasi validasi data spasial IGT P4T."""
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -9,7 +10,11 @@ import pandas as pd
 import streamlit as st
 
 from app.core.rules_manager import get_active_rules_summary
-from app.core.validator import run_validation_for_all_categories, save_validation_snapshot
+from app.core.validator import (
+    build_discrepancy_report_excel,
+    run_validation_for_all_categories,
+    save_validation_snapshot,
+)
 
 st.set_page_config(page_title="Validasi Data Spasial IGT P4T", page_icon="🗺️", layout="wide")
 
@@ -51,6 +56,12 @@ else:
     st.caption(
         f"Hasil validasi beserta kandidat koreksi disimpan di `output/{snapshot_path.name}` "
         "untuk dipakai antarmuka koreksi."
+    )
+    st.download_button(
+        label="Download Laporan Ringkasan Diskrepansi (Excel)",
+        data=build_discrepancy_report_excel(results),
+        file_name=f"laporan_diskrepansi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     for category, result in sorted(results.items()):
         with st.expander(
