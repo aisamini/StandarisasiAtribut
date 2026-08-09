@@ -11,7 +11,8 @@ import streamlit as st
 from app.core.rules_manager import get_ruleset_summary
 from app.core.validator import (
     build_discrepancy_report_excel,
-    run_validation_for_all_data_files,
+    display_value,
+    run_validation_over_data_folder,
     save_validation_snapshot,
 )
 
@@ -19,8 +20,8 @@ st.set_page_config(page_title="Validasi Data Spasial IGT P4T", page_icon="🗺�
 
 st.title("Validasi Data Spasial IGT P4T")
 st.write(
-    "Aplikasi untuk memvalidasi atribut data spasial Informasi Geospasial Tematik "
-    "Penatagunaan dan Penguasaan Tanah (IGT P4T) terhadap ruleset standar per IGT "
+    "Aplikasi untuk memvalidasi atribut data spasial IGT P4T level **Rinci** "
+    "(satu-satunya level yang ada di data lapangan) terhadap ruleset per IGT "
     "(nama kolom mengikuti Permen ATR No. 1 Tahun 2025)."
 )
 
@@ -33,72 +34,68 @@ if (ruleset_summary_df["Status"] == "Belum Ada").any():
 st.divider()
 
 st.subheader("Ringkasan Hasil Validasi Data")
-results = run_validation_for_all_data_files()
-snapshot_path = save_validation_snapshot(results)
+st.caption(
+    "Semua file di folder `data/` digabung jadi satu dataset (kolom SUMBER_FILE "
+    "menandai asal tiap baris) sebelum divalidasi. Untuk mengunggah banyak file "
+    "sekaligus, gunakan halaman **Validasi Data**."
+)
 
-if not results:
+merged_df, result = run_validation_over_data_folder()
+snapshot_path = save_validation_snapshot(result)
+
+if result.total_records == 0:
     st.info("Belum ada file data di folder `data/` untuk divalidasi.")
 else:
-    st.caption(
-        f"Hasil validasi beserta kandidat koreksi disimpan di `output/{snapshot_path.name}` "
-        "untuk dipakai antarmuka koreksi."
-    )
+    st.write(f"Total **{result.total_records}** record dari **{len(result.sumber_files)}** file: {', '.join(result.sumber_files)}")
+    st.caption(f"Snapshot hasil validasi disimpan di `output/{snapshot_path.name}`.")
+
     st.download_button(
-        label="Download Laporan Ringkasan Diskrepansi (Excel)",
-        data=build_discrepancy_report_excel(results),
+        label="Download Laporan Ringkasan Diskrepansi (Excel, 2 sheet)",
+        data=build_discrepancy_report_excel(result, merged_df),
         file_name=f"laporan_diskrepansi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    for result in results:
-        if result.unmatched:
-            with st.expander(f"{result.data_file}  —  {result.total_records} record", expanded=False):
+    if not result.column_stats:
+        st.warning(
+            "Tidak ada kolom level Rinci (mis. 'ptnObjRI') yang dikenali di data manapun. "
+            "Cek apakah nama kolom sudah sesuai prefix IGT yang terdaftar."
+        )
+
+    for cs in result.column_stats:
+        with st.expander(f"{cs.nama_igt} — kolom `{cs.column}`", expanded=True):
+            if not cs.ruleset_tersedia:
                 st.warning(
-                    "Tidak ada kolom IGT+level yang dikenali di file ini (cek prefix kolom "
-                    "sesuai Permen)."
+                    f"IGT '{cs.nama_igt}' belum punya ruleset aktif — seluruh {cs.total_checked} "
+                    "record belum bisa divalidasi. Unggah rulesetnya di halaman **Kelola Aturan**."
                 )
-            continue
+                continue
 
-        with st.expander(f"{result.data_file}  —  {result.total_records} record", expanded=True):
-            for lr in result.level_results:
-                st.markdown(f"**{lr.nama_igt} / Level {lr.level}**")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Record", cs.total_checked)
+            col2.metric("Cocok / Valid", cs.valid_count)
+            col3.metric("Salah Total", cs.salah_total_count)
+            col4.metric("Typo", cs.typo_count)
 
-                if not lr.ruleset_tersedia:
-                    st.warning(
-                        f"IGT '{lr.nama_igt}' belum punya ruleset aktif — seluruh {lr.total_records} "
-                        "record di level ini belum bisa divalidasi. Unggah rulesetnya di "
-                        "halaman **Kelola Aturan**."
+            if cs.unique_value_info:
+                rows = []
+                for value, info in sorted(
+                    cs.unique_value_info.items(), key=lambda kv: kv[1]["frekuensi"], reverse=True
+                ):
+                    candidates_str = (
+                        ", ".join(f"{c['nilai']} ({c['skor_persen']}%)" for c in info["kandidat"])
+                        if info["kandidat"]
+                        else "-"
                     )
-                    continue
-
-                persentase = f"{lr.error_count / lr.total_records:.1%}" if lr.total_records else "0.0%"
-                st.write(f"Jumlah record salah: **{lr.error_count}** dari {lr.total_records} ({persentase})")
-
-                if lr.invalid_pair_counts:
-                    invalid_rows = []
-                    for key, freq in sorted(
-                        lr.invalid_pair_counts.items(), key=lambda kv: kv[1], reverse=True
-                    ):
-                        kode, _, nama = key.partition("||")
-                        candidates = lr.suggestions.get(key, [])
-                        candidates_str = (
-                            ", ".join(
-                                f"{c['kode']} - {c['nama']} ({c['skor_persen']}%)" for c in candidates
-                            )
-                            if candidates
-                            else "-"
-                        )
-                        invalid_rows.append(
-                            {
-                                "Kode": kode,
-                                "Nama": nama,
-                                "Frekuensi": freq,
-                                "Top-3 Kandidat Pengganti (skor)": candidates_str,
-                            }
-                        )
-                    st.dataframe(invalid_rows, use_container_width=True, hide_index=True)
-
-                st.divider()
+                    rows.append(
+                        {
+                            "Nilai": display_value(value),
+                            "Frekuensi": info["frekuensi"],
+                            "Kategori": info["kategori"],
+                            "Top-5 Kandidat (Typo saja)": candidates_str,
+                        }
+                    )
+                st.dataframe(rows, use_container_width=True, hide_index=True)
 
 st.divider()
-st.write("Gunakan menu di sidebar untuk mengelola aturan atau menjalankan validasi data.")
+st.write("Gunakan menu di sidebar untuk mengelola aturan atau menjalankan validasi/koreksi data.")

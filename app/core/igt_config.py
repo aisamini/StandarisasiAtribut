@@ -111,32 +111,30 @@ def get_igt_columns(prefix: str) -> list[str]:
     return columns
 
 
-def detect_igt_level_columns(
+def detect_igt_ri_columns(
     columns: Iterable[str], igt_list: list[dict] | None = None
 ) -> list[dict]:
-    """Deteksi kombinasi IGT+level mana saja yang kolom nama & kodenya ada di `columns`.
+    """Deteksi kolom level Rinci ("[prefix]ObjRI") IGT mana saja yang ada di `columns`.
 
-    Satu file data bisa berisi kolom lebih dari satu IGT/level sekaligus (atau tidak
-    satupun). Mengembalikan list of {"nama_igt","prefix","level","name_col","code_col"}.
+    Data spasial P4T di lapangan hanya punya kolom level Rinci per IGT (mis. "PTNOBJRI"),
+    tanpa kolom terpisah untuk Besar/Menengah/Kecil, dan sering seluruhnya huruf besar —
+    jadi perbandingan nama kolom dilakukan case-insensitive. Mengembalikan
+    list of {"nama_igt", "prefix", "column"} (nama kolom asli sesuai `columns`).
     """
     igt_list = igt_list if igt_list is not None else load_igt_list()
-    columns_set = set(columns)
+    columns_by_upper: dict[str, str] = {str(c).upper(): c for c in columns}
     matches: list[dict] = []
 
     for item in igt_list:
         nama_igt, prefix = item["nama_igt"], item["prefix"]
-        for level in LEVELS:
-            name_col = get_name_col(prefix, level)
-            code_col = get_code_col(prefix, level)
-            if name_col in columns_set and code_col in columns_set:
-                matches.append(
-                    {
-                        "nama_igt": nama_igt,
-                        "prefix": prefix,
-                        "level": level,
-                        "name_col": name_col,
-                        "code_col": code_col,
-                    }
-                )
+        expected = get_name_col(prefix, "RI").upper()
+        if expected in columns_by_upper:
+            matches.append(
+                {
+                    "nama_igt": nama_igt,
+                    "prefix": prefix,
+                    "column": columns_by_upper[expected],
+                }
+            )
 
     return matches

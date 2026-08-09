@@ -158,40 +158,34 @@ def load_active_ruleset(nama_igt: str) -> pd.DataFrame | None:
     return pd.read_csv(path, dtype=str)
 
 
-def _extract_valid_pairs(df: pd.DataFrame, prefix: str, level: str) -> set[tuple[str, str]]:
-    """Set pasangan (kode, nama) yang terisi lengkap pada df ruleset untuk satu level."""
-    name_col, code_col = get_name_col(prefix, level), get_code_col(prefix, level)
-    if name_col not in df.columns or code_col not in df.columns:
-        return set()
+def get_valid_ri_values(nama_igt: str) -> set[str] | None:
+    """Set nilai valid level Rinci (kolom "[prefix]ObjRI") untuk satu IGT.
 
-    pairs: set[tuple[str, str]] = set()
-    for kode, nama in zip(df[code_col], df[name_col]):
-        kode_str = "" if pd.isna(kode) else str(kode).strip()
-        nama_str = "" if pd.isna(nama) else str(nama).strip()
-        if kode_str and nama_str:
-            pairs.add((kode_str, nama_str))
-    return pairs
-
-
-def get_valid_pairs(nama_igt: str, level: str) -> set[tuple[str, str]] | None:
-    """Set pasangan (kode, nama) valid untuk satu IGT+level, atau None kalau IGT belum punya ruleset."""
+    Kolom Besar/Menengah/Kecil di ruleset tetap tersimpan untuk referensi/dokumentasi,
+    tapi TIDAK dipakai di sini — validasi data spasial hanya di level Rinci (data
+    lapangan cuma punya kolom Rinci per IGT, tanpa kolom level lain). Mengembalikan
+    None kalau IGT belum punya ruleset aktif.
+    """
     df = load_active_ruleset(nama_igt)
     if df is None:
         return None
     prefix = get_prefix(nama_igt)
-    return _extract_valid_pairs(df, prefix, level)
+    name_col = get_name_col(prefix, "RI")
+    if name_col not in df.columns:
+        return set()
+    values = df[name_col].dropna().astype(str).str.strip()
+    return set(values[values != ""])
 
 
-def build_ruleset_lookup(igt_list: list[dict] | None = None) -> dict[str, dict[str, set[tuple[str, str]]]]:
-    """{nama_igt: {level: {(kode, nama), ...}}} — hanya untuk IGT yang sudah punya ruleset aktif."""
+def build_ri_ruleset_lookup(igt_list: list[dict] | None = None) -> dict[str, set[str]]:
+    """{nama_igt: {nilai_valid_rinci, ...}} — hanya untuk IGT yang sudah punya ruleset aktif."""
     igt_list = igt_list if igt_list is not None else load_igt_list()
-    lookup: dict[str, dict[str, set[tuple[str, str]]]] = {}
+    lookup: dict[str, set[str]] = {}
     for item in igt_list:
-        nama_igt, prefix = item["nama_igt"], item["prefix"]
-        df = load_active_ruleset(nama_igt)
-        if df is None:
-            continue
-        lookup[nama_igt] = {level: _extract_valid_pairs(df, prefix, level) for level in LEVELS}
+        nama_igt = item["nama_igt"]
+        valid_values = get_valid_ri_values(nama_igt)
+        if valid_values is not None:
+            lookup[nama_igt] = valid_values
     return lookup
 
 

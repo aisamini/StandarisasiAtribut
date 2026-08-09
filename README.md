@@ -62,6 +62,24 @@ Halaman `Kelola Aturan` (di sidebar) memungkinkan:
 
 ## Validasi Data & Koreksi
 
-Kolom IGT+level pada file data dideteksi otomatis dari nama kolomnya (bukan dari nama
-file). Setiap pasangan kode+nama pada tiap baris dicocokkan ke ruleset IGT tsb pada
-level yang sama; kandidat koreksi (rapidfuzz) juga hanya dicari di level & IGT yang sama.
+Data spasial P4T di lapangan hanya punya kolom level **Rinci** per IGT (mis.
+`PTNOBJRI`, sering seluruhnya huruf besar) — jadi validasi hanya mencocokkan kolom itu
+ke daftar nilai valid `[prefix]ObjRI` di ruleset IGT terkait (perbandingan nama kolom
+case-insensitive). Kolom Besar/Menengah/Kecil di ruleset tetap tersimpan untuk
+referensi tapi tidak dipakai untuk pencocokan otomatis ini.
+
+Banyak file data bisa digabung jadi satu dataset sebelum divalidasi — halaman
+**Home** otomatis menggabungkan semua file di `data/`, atau unggah banyak file
+sekaligus lewat halaman **Validasi Data**. Kolom `SUMBER_FILE` menandai file asal
+tiap baris untuk pelacakan.
+
+Tiap nilai salah diklasifikasikan **Salah Total** (kosong/dummy/kata kunci error/teks
+< 3 karakter) atau **Typo** (kemungkinan cuma salah ketik). Kandidat koreksi
+(rapidfuzz, top-5) dihitung sekali per nilai unik yang salah, bukan per baris. Laporan
+Excel berisi 2 sheet: `Ringkasan_Validasi` (statistik per kolom) dan
+`Perlu_Koreksi_Manual` (khusus baris Salah Total).
+
+Halaman **Koreksi Data** menampilkan satu baris per nilai unik yang salah (bukan per
+record) — satu koreksi berlaku untuk semua baris yang punya nilai itu, di semua file
+sumbernya, dan input manual selalu diutamakan di atas pilihan dropdown kalau diisi.
+Setelah koreksi diterapkan, halaman menampilkan ringkasan verifikasi ulang per kolom.

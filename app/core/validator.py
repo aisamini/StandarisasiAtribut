@@ -1,10 +1,13 @@
-"""Deteksi & validasi atribut data spasial IGT P4T terhadap ruleset aktif per IGT+level.
+"""Validasi atribut data spasial IGT P4T level Rinci terhadap ruleset aktif.
 
-Kolom IGT+level yang ada di sebuah file data dideteksi otomatis dari nama kolomnya
-(lihat app/core/igt_config.py). Untuk tiap kombinasi IGT+level yang terdeteksi,
-pasangan (kode, nama) tiap baris dicocokkan ke ruleset aktif IGT itu PADA LEVEL YANG
-SAMA. Kandidat kemiripan (rapidfuzz) juga dicari hanya di antara nilai valid level
-dan IGT yang sama — tidak pernah dicampur antar level atau antar IGT.
+Data spasial P4T di lapangan hanya punya kolom level Rinci per IGT (mis. PTNOBJRI),
+jadi validasi HANYA mencocokkan kolom itu ke daftar nilai valid Rinci ("[prefix]ObjRI")
+di ruleset IGT terkait — kolom Besar/Menengah/Kecil di ruleset tidak dipakai untuk ini.
+
+Banyak file data spasial bisa digabung jadi satu dataset (dengan kolom SUMBER_FILE
+untuk pelacakan asal baris) sebelum divalidasi. Fuzzy matching (rapidfuzz) dihitung
+sekali per NILAI UNIK yang salah per kolom, lalu hasilnya dipakai untuk semua baris
+yang punya nilai itu — bukan dihitung ulang per baris.
 """
 
 from __future__ import annotations
@@ -16,217 +19,58 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from openpyxl.styles import Font, PatternFill
 from rapidfuzz import fuzz, process
 
 from app.config import DATA_DIR, OUTPUT_DIR
-from app.core.igt_config import detect_igt_level_columns, load_igt_list
-from app.core.io_utils import SUPPORTED_EXTENSIONS, DataReadError, read_attribute_table
-from app.core.rules_manager import build_ruleset_lookup
+from app.core.igt_config import detect_igt_ri_columns, load_igt_list
+from app.core.io_utils import (
+    SUPPORTED_EXTENSIONS,
+    DataReadError,
+    read_attribute_table,
+    write_attribute_table,
+)
+from app.core.rules_manager import build_ri_ruleset_lookup
 
-EMPTY_VALUE_LABEL = "(kosong)"
-SUGGESTION_LIMIT = 3
+SUGGESTION_LIMIT = 5
 VALIDATION_SNAPSHOT_PATH = OUTPUT_DIR / "validasi_terakhir.json"
 
+SUMBER_FILE_COL = "SUMBER_FILE"
+ROW_ASAL_COL = "_ROW_ASAL"
 
-def _pair_key(kode: str, nama: str) -> str:
-    return f"{kode}||{nama}"
+DUMMY_VALUES = {"", "-", ".", "0", "NAN"}
+ERROR_KEYWORDS = ["KOSONG", "UNKNOWN", "SALAH", "ERROR", "TIDAK ADA", "XXX"]
+MIN_VALID_LENGTH = 3
 
-
-def _split_pair_key(key: str) -> tuple[str, str]:
-    kode, _, nama = key.partition("||")
-    return kode, nama
-
-
-@dataclass
-class LevelValidationResult:
-    """Hasil validasi satu kombinasi IGT+level pada satu file data."""
-
-    nama_igt: str
-    level: str
-    name_col: str
-    code_col: str
-    total_records: int
-    ruleset_tersedia: bool
-    error_count: int = 0
-    # key = "kode||nama" -> frekuensi
-    invalid_pair_counts: dict[str, int] = field(default_factory=dict)
-    # key = "kode||nama" -> [{"kode":..,"nama":..,"skor_persen":..}, ...] top-3 kandidat
-    suggestions: dict[str, list[dict[str, float | str]]] = field(default_factory=dict)
+KATEGORI_SALAH_TOTAL = "Salah Total"
+KATEGORI_TYPO = "Typo"
 
 
-@dataclass
-class FileValidationResult:
-    """Hasil validasi satu file data, bisa mencakup lebih dari satu IGT+level."""
-
-    data_file: str
-    total_records: int
-    level_results: list[LevelValidationResult] = field(default_factory=list)
-    unmatched: bool = False  # True kalau tidak ada kolom IGT manapun yang terdeteksi di file ini
+def display_value(value: str) -> str:
+    """Representasi tampilan untuk nilai kosong (string kosong -> '(kosong)')."""
+    return "(kosong)" if value == "" else value
 
 
-@dataclass
-class InvalidPairRecord:
-    """Satu record (baris) yang pasangan kode+nama-nya salah, siap dikoreksi."""
+def classify_error(value) -> str:
+    """Klasifikasikan satu nilai salah: 'Salah Total' atau 'Typo'.
 
-    row_index: int
-    nama_igt: str
-    level: str
-    name_col: str
-    code_col: str
-    current_kode: str
-    current_nama: str
-    candidates: list[dict[str, float | str]] = field(default_factory=list)
-
-
-def get_top_pair_suggestions(
-    current_nama: str,
-    valid_pairs: set[tuple[str, str]],
-    limit: int = SUGGESTION_LIMIT,
-) -> list[dict[str, float | str]]:
-    """Cari top-N pasangan (kode, nama) valid paling mirip, dibandingkan lewat teks nama.
-
-    Kandidat HANYA diambil dari valid_pairs yang diberikan (yaitu level+IGT yang sama
-    dengan record yang sedang dikoreksi) — tidak pernah mencampur level/IGT lain.
+    Salah Total: kosong/null, nilai dummy ("-", ".", "0"), mengandung kata kunci error
+    (KOSONG/UNKNOWN/SALAH/ERROR/TIDAK ADA/XXX), atau panjang teks < 3 karakter.
+    Selain itu dianggap Typo (kemungkinan cuma salah ketik minor).
     """
-    if not valid_pairs or not current_nama or current_nama == EMPTY_VALUE_LABEL:
-        return []
+    if pd.isna(value):
+        return KATEGORI_SALAH_TOTAL
 
-    nama_to_kode: dict[str, str] = {}
-    for kode, nama in valid_pairs:
-        nama_to_kode.setdefault(nama, kode)
+    text = str(value).strip()
+    text_upper = text.upper()
 
-    matches = process.extract(
-        current_nama, list(nama_to_kode.keys()), scorer=fuzz.WRatio, limit=limit
-    )
-    return [
-        {"kode": nama_to_kode[nama], "nama": nama, "skor_persen": round(float(score), 1)}
-        for nama, score, _ in matches
-    ]
-
-
-def _pairs_and_invalid_mask(df: pd.DataFrame, name_col: str, code_col: str, valid_pairs: set[tuple[str, str]]):
-    """Pasangan (kode, nama) per baris sebagai string, dan mask baris yang invalid."""
-    nama_series = df[name_col].apply(lambda v: EMPTY_VALUE_LABEL if pd.isna(v) else str(v).strip())
-    kode_series = df[code_col].apply(lambda v: EMPTY_VALUE_LABEL if pd.isna(v) else str(v).strip())
-    pairs = list(zip(kode_series, nama_series))
-    is_invalid = pd.Series([p not in valid_pairs for p in pairs], index=df.index)
-    return kode_series, nama_series, is_invalid
-
-
-def validate_dataframe_against_igt_rules(
-    df: pd.DataFrame,
-    igt_list: list[dict] | None = None,
-    lookup: dict[str, dict[str, set[tuple[str, str]]]] | None = None,
-    data_file: str = "",
-) -> FileValidationResult:
-    """Deteksi kombinasi IGT+level di df, lalu validasi tiap pasangan kode+nama per baris.
-
-    Untuk level yang IGT-nya belum punya ruleset aktif, seluruh baris ditandai belum
-    tervalidasi (ruleset_tersedia=False) supaya terlihat jelas perlu upload ruleset dulu.
-    """
-    if igt_list is None:
-        igt_list = load_igt_list()
-    if lookup is None:
-        lookup = build_ruleset_lookup(igt_list)
-
-    matches = detect_igt_level_columns(df.columns, igt_list)
-    level_results: list[LevelValidationResult] = []
-
-    for match in matches:
-        nama_igt, level = match["nama_igt"], match["level"]
-        name_col, code_col = match["name_col"], match["code_col"]
-
-        valid_pairs = lookup.get(nama_igt, {}).get(level)
-        ruleset_tersedia = valid_pairs is not None
-        valid_pairs = valid_pairs or set()
-
-        kode_series, nama_series, is_invalid = _pairs_and_invalid_mask(
-            df, name_col, code_col, valid_pairs
-        )
-        if not ruleset_tersedia:
-            is_invalid = pd.Series([True] * len(df), index=df.index)
-
-        error_count = int(is_invalid.sum())
-        invalid_pair_counts: dict[str, int] = {}
-        for kode, nama, invalid in zip(kode_series, nama_series, is_invalid):
-            if invalid:
-                key = _pair_key(kode, nama)
-                invalid_pair_counts[key] = invalid_pair_counts.get(key, 0) + 1
-
-        suggestions: dict[str, list[dict[str, float | str]]] = {}
-        if ruleset_tersedia:
-            for key in invalid_pair_counts:
-                _, nama = _split_pair_key(key)
-                suggestions[key] = get_top_pair_suggestions(nama, valid_pairs)
-
-        level_results.append(
-            LevelValidationResult(
-                nama_igt=nama_igt,
-                level=level,
-                name_col=name_col,
-                code_col=code_col,
-                total_records=len(df),
-                ruleset_tersedia=ruleset_tersedia,
-                error_count=error_count,
-                invalid_pair_counts=invalid_pair_counts,
-                suggestions=suggestions,
-            )
-        )
-
-    return FileValidationResult(
-        data_file=data_file,
-        total_records=len(df),
-        level_results=level_results,
-        unmatched=not matches,
-    )
-
-
-def get_invalid_pair_records(
-    df: pd.DataFrame,
-    igt_list: list[dict] | None = None,
-    lookup: dict[str, dict[str, set[tuple[str, str]]]] | None = None,
-) -> list[InvalidPairRecord]:
-    """Daftar record (baris) yang pasangan kode+nama-nya salah, siap ditampilkan di UI koreksi.
-
-    Hanya mencakup kombinasi IGT+level yang SUDAH punya ruleset aktif (tanpa ruleset,
-    tidak ada dasar untuk menyarankan koreksi).
-    """
-    if igt_list is None:
-        igt_list = load_igt_list()
-    if lookup is None:
-        lookup = build_ruleset_lookup(igt_list)
-
-    matches = detect_igt_level_columns(df.columns, igt_list)
-    records: list[InvalidPairRecord] = []
-
-    for match in matches:
-        nama_igt, level = match["nama_igt"], match["level"]
-        name_col, code_col = match["name_col"], match["code_col"]
-
-        valid_pairs = lookup.get(nama_igt, {}).get(level)
-        if valid_pairs is None:
-            continue
-
-        kode_series, nama_series, is_invalid = _pairs_and_invalid_mask(
-            df, name_col, code_col, valid_pairs
-        )
-        for row_index in df.index[is_invalid]:
-            current_kode = kode_series.loc[row_index]
-            current_nama = nama_series.loc[row_index]
-            records.append(
-                InvalidPairRecord(
-                    row_index=int(row_index),
-                    nama_igt=nama_igt,
-                    level=level,
-                    name_col=name_col,
-                    code_col=code_col,
-                    current_kode=current_kode,
-                    current_nama=current_nama,
-                    candidates=get_top_pair_suggestions(current_nama, valid_pairs),
-                )
-            )
-
-    return records
+    if text_upper in DUMMY_VALUES:
+        return KATEGORI_SALAH_TOTAL
+    if any(keyword in text_upper for keyword in ERROR_KEYWORDS):
+        return KATEGORI_SALAH_TOTAL
+    if len(text) < MIN_VALID_LENGTH:
+        return KATEGORI_SALAH_TOTAL
+    return KATEGORI_TYPO
 
 
 def list_data_files() -> list[Path]:
@@ -238,32 +82,250 @@ def list_data_files() -> list[Path]:
     return [p for p in paths if not (p.suffix.lower() == ".dbf" and p.stem in shp_stems)]
 
 
-def run_validation_for_all_data_files() -> list[FileValidationResult]:
-    """Jalankan validasi untuk semua file di data/, deteksi IGT+level otomatis per file."""
-    igt_list = load_igt_list()
-    lookup = build_ruleset_lookup(igt_list)
+def load_and_merge_data_files(paths: list[Path]) -> pd.DataFrame:
+    """Baca banyak file data (Excel/DBF/CSV) lalu gabungkan jadi satu DataFrame.
 
-    results: list[FileValidationResult] = []
-    for path in list_data_files():
+    Menambahkan kolom SUMBER_FILE (nama file asal tiap baris, untuk pelacakan) dan
+    _ROW_ASAL (index baris di file asalnya, dipakai untuk menulis koreksi balik ke
+    file yang tepat). File yang gagal dibaca dilewati.
+    """
+    frames = []
+    for path in paths:
         try:
             df = read_attribute_table(path)
         except DataReadError:
             continue
-        results.append(
-            validate_dataframe_against_igt_rules(df, igt_list, lookup, data_file=path.name)
-        )
-    return results
+        df = df.reset_index(drop=True)
+        df.insert(0, ROW_ASAL_COL, df.index)
+        df.insert(0, SUMBER_FILE_COL, path.name)
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(columns=[SUMBER_FILE_COL, ROW_ASAL_COL])
+    return pd.concat(frames, ignore_index=True, sort=False)
 
 
-def save_validation_snapshot(results: list[FileValidationResult], path: Path | None = None) -> Path:
-    """Simpan hasil validasi (termasuk saran koreksi rapidfuzz) ke output/ sebagai JSON.
+def build_unique_value_info(
+    series: pd.Series, valid_values: set[str], limit: int = SUGGESTION_LIMIT
+) -> dict[str, dict]:
+    """Untuk tiap nilai unik pada `series` yang TIDAK ada di valid_values: klasifikasi
+    kategori error + top-N kandidat kemiripan — dihitung SEKALI per nilai unik.
 
-    Snapshot ini dipakai oleh antarmuka koreksi supaya tidak perlu menjalankan
-    ulang validasi hanya untuk menampilkan nilai salah dan kandidat penggantinya.
+    Mengembalikan {nilai: {"frekuensi": int, "kategori": str, "kandidat": [...]}}.
+    Kandidat hanya dihitung untuk kategori Typo (Salah Total tidak punya dasar teks
+    yang cukup untuk disarankan otomatis, perlu koreksi manual).
     """
+    text_series = series.apply(lambda v: "" if pd.isna(v) else str(v).strip())
+    invalid_mask = ~text_series.isin(valid_values)
+    counts = text_series[invalid_mask].value_counts()
+
+    valid_list = list(valid_values)
+    info: dict[str, dict] = {}
+    for value, freq in counts.items():
+        kategori = classify_error(value)
+        candidates: list[dict[str, float | str]] = []
+        if kategori == KATEGORI_TYPO and valid_list:
+            matches = process.extract(value, valid_list, scorer=fuzz.WRatio, limit=limit)
+            candidates = [
+                {"nilai": candidate, "skor_persen": round(float(score), 1)}
+                for candidate, score, _ in matches
+            ]
+        info[value] = {"frekuensi": int(freq), "kategori": kategori, "kandidat": candidates}
+
+    return info
+
+
+@dataclass
+class ColumnValidationStats:
+    """Statistik validasi satu kolom Rinci (satu IGT) pada dataset gabungan."""
+
+    nama_igt: str
+    column: str
+    total_checked: int
+    ruleset_tersedia: bool
+    valid_count: int = 0
+    salah_total_count: int = 0
+    typo_count: int = 0
+    # {nilai: {"frekuensi": int, "kategori": str, "kandidat": [...]}}
+    unique_value_info: dict[str, dict] = field(default_factory=dict)
+
+
+@dataclass
+class MergedValidationResult:
+    """Hasil validasi atas dataset gabungan (bisa berasal dari banyak file)."""
+
+    total_records: int
+    sumber_files: list[str] = field(default_factory=list)
+    column_stats: list[ColumnValidationStats] = field(default_factory=list)
+
+
+def validate_merged_dataframe(
+    df: pd.DataFrame,
+    igt_list: list[dict] | None = None,
+    ri_lookup: dict[str, set[str]] | None = None,
+) -> MergedValidationResult:
+    """Deteksi kolom Rinci per IGT di df, lalu validasi & klasifikasikan tiap nilai."""
+    if igt_list is None:
+        igt_list = load_igt_list()
+    if ri_lookup is None:
+        ri_lookup = build_ri_ruleset_lookup(igt_list)
+
+    matches = detect_igt_ri_columns(df.columns, igt_list)
+    column_stats: list[ColumnValidationStats] = []
+
+    for match in matches:
+        nama_igt, column = match["nama_igt"], match["column"]
+        valid_values = ri_lookup.get(nama_igt)
+        ruleset_tersedia = valid_values is not None
+        valid_values = valid_values or set()
+
+        if ruleset_tersedia:
+            unique_info = build_unique_value_info(df[column], valid_values)
+            error_total = sum(v["frekuensi"] for v in unique_info.values())
+            salah_total_count = sum(
+                v["frekuensi"] for v in unique_info.values() if v["kategori"] == KATEGORI_SALAH_TOTAL
+            )
+            typo_count = error_total - salah_total_count
+            valid_count = len(df) - error_total
+        else:
+            unique_info, salah_total_count, typo_count, valid_count = {}, 0, 0, 0
+
+        column_stats.append(
+            ColumnValidationStats(
+                nama_igt=nama_igt,
+                column=column,
+                total_checked=len(df),
+                ruleset_tersedia=ruleset_tersedia,
+                valid_count=valid_count,
+                salah_total_count=salah_total_count,
+                typo_count=typo_count,
+                unique_value_info=unique_info,
+            )
+        )
+
+    sumber_files = (
+        sorted(df[SUMBER_FILE_COL].dropna().unique().tolist()) if SUMBER_FILE_COL in df.columns else []
+    )
+    return MergedValidationResult(total_records=len(df), sumber_files=sumber_files, column_stats=column_stats)
+
+
+def run_validation_over_data_folder() -> tuple[pd.DataFrame, MergedValidationResult]:
+    """Baca+gabungkan semua file di data/, lalu validasi sebagai satu dataset."""
+    igt_list = load_igt_list()
+    ri_lookup = build_ri_ruleset_lookup(igt_list)
+    merged_df = load_and_merge_data_files(list_data_files())
+    result = validate_merged_dataframe(merged_df, igt_list, ri_lookup)
+    return merged_df, result
+
+
+@dataclass
+class InvalidValueGroup:
+    """Satu nilai unik yang salah pada satu kolom IGT — mewakili SEMUA baris yang punya nilai ini."""
+
+    nama_igt: str
+    column: str
+    nilai_saat_ini: str
+    frekuensi: int
+    kategori: str
+    kandidat: list[dict[str, float | str]] = field(default_factory=list)
+
+
+def get_invalid_value_groups(
+    df: pd.DataFrame,
+    igt_list: list[dict] | None = None,
+    ri_lookup: dict[str, set[str]] | None = None,
+) -> list[InvalidValueGroup]:
+    """Daftar nilai unik salah per kolom, siap ditampilkan sebagai satu baris koreksi
+    di UI (bukan per record) — mengoreksi satu grup akan berlaku untuk semua baris
+    yang punya nilai tsb. Hanya mencakup kolom yang IGT-nya sudah punya ruleset aktif.
+    """
+    if igt_list is None:
+        igt_list = load_igt_list()
+    if ri_lookup is None:
+        ri_lookup = build_ri_ruleset_lookup(igt_list)
+
+    matches = detect_igt_ri_columns(df.columns, igt_list)
+    groups: list[InvalidValueGroup] = []
+
+    for match in matches:
+        nama_igt, column = match["nama_igt"], match["column"]
+        valid_values = ri_lookup.get(nama_igt)
+        if valid_values is None:
+            continue
+
+        unique_info = build_unique_value_info(df[column], valid_values)
+        for value, info in unique_info.items():
+            groups.append(
+                InvalidValueGroup(
+                    nama_igt=nama_igt,
+                    column=column,
+                    nilai_saat_ini=value,
+                    frekuensi=info["frekuensi"],
+                    kategori=info["kategori"],
+                    kandidat=info["kandidat"],
+                )
+            )
+
+    return groups
+
+
+def apply_value_corrections(
+    df: pd.DataFrame, corrections: dict[tuple[str, str], str]
+) -> pd.DataFrame:
+    """Terapkan koreksi ke SEMUA baris yang cocok, per (kolom, nilai_lama) -> nilai_baru.
+
+    Mengembalikan salinan df yang sudah dikoreksi (df asli tidak diubah).
+    """
+    corrected = df.copy()
+    for (column, nilai_lama), nilai_baru in corrections.items():
+        text_series = corrected[column].apply(lambda v: "" if pd.isna(v) else str(v).strip())
+        mask = text_series == nilai_lama
+        corrected.loc[mask, column] = nilai_baru
+    return corrected
+
+
+def split_and_write_back(corrected_df: pd.DataFrame, base_dir: Path = DATA_DIR) -> dict[str, Path]:
+    """Pisahkan dataset gabungan balik ke file asalnya (pakai SUMBER_FILE + _ROW_ASAL)
+    dan tulis tiap bagian ke file itu. Mengembalikan {nama_file: path_tersimpan}.
+    """
+    if SUMBER_FILE_COL not in corrected_df.columns or ROW_ASAL_COL not in corrected_df.columns:
+        raise ValueError(
+            "DataFrame tidak punya kolom SUMBER_FILE/_ROW_ASAL — bukan hasil load_and_merge_data_files()."
+        )
+
+    saved: dict[str, Path] = {}
+    for sumber_file, group in corrected_df.groupby(SUMBER_FILE_COL):
+        group_sorted = group.sort_values(ROW_ASAL_COL)
+        original_columns = [c for c in group_sorted.columns if c not in (SUMBER_FILE_COL, ROW_ASAL_COL)]
+        out_df = group_sorted[original_columns].reset_index(drop=True)
+        saved[sumber_file] = write_attribute_table(base_dir / sumber_file, out_df)
+
+    return saved
+
+
+def verify_after_correction(
+    df: pd.DataFrame,
+    igt_list: list[dict] | None = None,
+    ri_lookup: dict[str, set[str]] | None = None,
+) -> dict[tuple[str, str], int]:
+    """Setelah koreksi diterapkan, hitung berapa nilai UNIK yang masih tidak cocok per kolom.
+
+    Mengembalikan {(nama_igt, column): jumlah_nilai_unik_masih_salah}. Idealnya 0
+    untuk kolom yang sudah selesai dikoreksi.
+    """
+    groups = get_invalid_value_groups(df, igt_list, ri_lookup)
+    counts: dict[tuple[str, str], int] = {}
+    for group in groups:
+        key = (group.nama_igt, group.column)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def save_validation_snapshot(result: MergedValidationResult, path: Path | None = None) -> Path:
+    """Simpan hasil validasi (termasuk saran koreksi rapidfuzz) ke output/ sebagai JSON."""
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "results": [asdict(result) for result in results],
+        "result": asdict(result),
     }
     target_path = path or VALIDATION_SNAPSHOT_PATH
     target_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -278,79 +340,87 @@ def load_validation_snapshot(path: Path | None = None) -> dict | None:
     return json.loads(target_path.read_text(encoding="utf-8"))
 
 
-def build_discrepancy_report_excel(results: list[FileValidationResult]) -> bytes:
-    """Susun laporan ringkasan statistik diskrepansi hasil validasi jadi file Excel.
+def _style_header_row(worksheet) -> None:
+    """Styling sederhana: header bold putih dengan latar biru."""
+    bold_white = Font(bold=True, color="FFFFFF")
+    fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    for cell in worksheet[1]:
+        cell.font = bold_white
+        cell.fill = fill
 
-    Berisi 2 sheet:
-      - Ringkasan: total record, jumlah salah, dan status ruleset per file+IGT+level.
-      - Nilai_Tidak_Valid: tiap pasangan kode+nama salah, frekuensinya, dan top-3 kandidat.
+
+def build_discrepancy_report_excel(result: MergedValidationResult, df: pd.DataFrame) -> bytes:
+    """Susun laporan diskrepansi jadi Excel 2 sheet:
+
+    - Ringkasan_Validasi: statistik per kolom (Total Record Checked, Cocok/Valid,
+      jumlah Salah Total, jumlah Typo).
+    - Perlu_Koreksi_Manual: HANYA baris berkategori Salah Total, dengan kolom
+      KOLOM_BERMASALAH dan DETAIL_KATEGORI_ERROR.
     """
-    ringkasan_rows = []
-    invalid_rows = []
-
-    for result in results:
-        for lr in result.level_results:
-            ringkasan_rows.append(
-                {
-                    "File_Data": result.data_file,
-                    "Nama_IGT": lr.nama_igt,
-                    "Level": lr.level,
-                    "Ruleset_Tersedia": "Ya" if lr.ruleset_tersedia else "Tidak",
-                    "Total_Record": lr.total_records,
-                    "Jumlah_Record_Salah": lr.error_count,
-                    "Persentase_Salah": (
-                        round(lr.error_count / lr.total_records * 100, 2) if lr.total_records else 0.0
-                    ),
-                }
-            )
-            for key, freq in sorted(lr.invalid_pair_counts.items(), key=lambda kv: kv[1], reverse=True):
-                kode, nama = _split_pair_key(key)
-                candidates = lr.suggestions.get(key, [])
-                candidates_str = (
-                    "; ".join(f"{c['kode']} - {c['nama']} ({c['skor_persen']}%)" for c in candidates)
-                    if candidates
-                    else "-"
-                )
-                invalid_rows.append(
-                    {
-                        "File_Data": result.data_file,
-                        "Nama_IGT": lr.nama_igt,
-                        "Level": lr.level,
-                        "Kode_Salah": kode,
-                        "Nama_Salah": nama,
-                        "Frekuensi": freq,
-                        "Top3_Kandidat_Pengganti": candidates_str,
-                    }
-                )
-
+    ringkasan_rows = [
+        {
+            "Nama_IGT": cs.nama_igt,
+            "Kolom": cs.column,
+            "Ruleset_Tersedia": "Ya" if cs.ruleset_tersedia else "Tidak",
+            "Total_Record_Checked": cs.total_checked,
+            "Cocok_Valid": cs.valid_count,
+            "Salah_Total": cs.salah_total_count,
+            "Typo": cs.typo_count,
+        }
+        for cs in result.column_stats
+    ]
     ringkasan_df = pd.DataFrame(
         ringkasan_rows,
         columns=[
-            "File_Data",
             "Nama_IGT",
-            "Level",
+            "Kolom",
             "Ruleset_Tersedia",
-            "Total_Record",
-            "Jumlah_Record_Salah",
-            "Persentase_Salah",
+            "Total_Record_Checked",
+            "Cocok_Valid",
+            "Salah_Total",
+            "Typo",
         ],
     )
-    invalid_df = pd.DataFrame(
-        invalid_rows,
+
+    manual_rows = []
+    for cs in result.column_stats:
+        salah_total_values = {
+            value for value, info in cs.unique_value_info.items() if info["kategori"] == KATEGORI_SALAH_TOTAL
+        }
+        if not salah_total_values:
+            continue
+
+        text_series = df[cs.column].apply(lambda v: "" if pd.isna(v) else str(v).strip())
+        mask = text_series.isin(salah_total_values)
+        for idx in df.index[mask]:
+            manual_rows.append(
+                {
+                    "SUMBER_FILE": df.at[idx, SUMBER_FILE_COL] if SUMBER_FILE_COL in df.columns else "-",
+                    "Baris": (int(df.at[idx, ROW_ASAL_COL]) if ROW_ASAL_COL in df.columns else int(idx)) + 1,
+                    "Nama_IGT": cs.nama_igt,
+                    "KOLOM_BERMASALAH": cs.column,
+                    "Nilai_Saat_Ini": display_value(text_series.loc[idx]),
+                    "DETAIL_KATEGORI_ERROR": KATEGORI_SALAH_TOTAL,
+                }
+            )
+
+    manual_df = pd.DataFrame(
+        manual_rows,
         columns=[
-            "File_Data",
+            "SUMBER_FILE",
+            "Baris",
             "Nama_IGT",
-            "Level",
-            "Kode_Salah",
-            "Nama_Salah",
-            "Frekuensi",
-            "Top3_Kandidat_Pengganti",
+            "KOLOM_BERMASALAH",
+            "Nilai_Saat_Ini",
+            "DETAIL_KATEGORI_ERROR",
         ],
     )
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        ringkasan_df.to_excel(writer, index=False, sheet_name="Ringkasan")
-        invalid_df.to_excel(writer, index=False, sheet_name="Nilai_Tidak_Valid")
+        ringkasan_df.to_excel(writer, index=False, sheet_name="Ringkasan_Validasi")
+        manual_df.to_excel(writer, index=False, sheet_name="Perlu_Koreksi_Manual")
+        _style_header_row(writer.sheets["Ringkasan_Validasi"])
+        _style_header_row(writer.sheets["Perlu_Koreksi_Manual"])
     buffer.seek(0)
     return buffer.getvalue()
