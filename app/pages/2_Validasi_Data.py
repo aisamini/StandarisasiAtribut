@@ -15,6 +15,7 @@ import streamlit as st
 
 from app.core.rules_manager import build_ri_ruleset_lookup
 from app.core.session_state import (
+    SS_CHANGED_CELLS,
     SS_DATA_SOURCE,
     SS_MERGED_DF,
     SS_SUMBER_FILES,
@@ -73,6 +74,8 @@ if uploaded_files:
         st.session_state[SS_SUMBER_FILES] = sorted(merged_df["SUMBER_FILE"].unique().tolist())
         st.session_state[SS_VALIDATION_RESULT] = result
         st.session_state[SS_DATA_SOURCE] = "upload"
+        # Dataset baru -> koordinat sel terkoreksi sebelumnya sudah tidak relevan.
+        st.session_state[SS_CHANGED_CELLS] = set()
 
 merged_df = st.session_state[SS_MERGED_DF]
 result = st.session_state[SS_VALIDATION_RESULT]

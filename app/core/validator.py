@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from rapidfuzz import fuzz, process
 
 from app.config import DATA_DIR, OUTPUT_DIR
@@ -38,6 +38,11 @@ VALIDATION_SNAPSHOT_PATH = OUTPUT_DIR / "validasi_terakhir.json"
 
 SUMBER_FILE_COL = "SUMBER_FILE"
 ROW_ASAL_COL = "_ROW_ASAL"
+
+# Kolom identitas (NO_URUT + wilayah administrasi) — HANYA untuk ditampilkan/referensi,
+# tidak pernah ikut logika pencocokan/validasi terhadap ruleset. Ditampilkan kalau ada
+# di data, dilewati kalau tidak ada (tanpa error).
+IDENTITY_COLUMNS = ["NO_URUT", "WADMKP", "WADMKK", "WADMKC", "WADMKD"]
 
 DUMMY_VALUES = {"", "-", ".", "0", "NAN"}
 ERROR_KEYWORDS = ["KOSONG", "UNKNOWN", "SALAH", "ERROR", "TIDAK ADA", "XXX"]
@@ -287,19 +292,52 @@ def get_invalid_value_groups(
     return groups
 
 
+def get_present_identity_columns(df: pd.DataFrame, include_sumber_file: bool = True) -> list[str]:
+    """Kolom identitas (NO_URUT/WADMK*/SUMBER_FILE) yang benar-benar ada di df, urut baku.
+
+    Kolom yang tidak ada di df dilewati saja (tidak dianggap error).
+    """
+    columns = [c for c in IDENTITY_COLUMNS if c in df.columns]
+    if include_sumber_file and SUMBER_FILE_COL in df.columns:
+        columns.append(SUMBER_FILE_COL)
+    return columns
+
+
+def get_context_rows_for_value(df: pd.DataFrame, column: str, nilai: str) -> pd.DataFrame:
+    """Baris-baris yang nilainya (setelah normalisasi) sama dengan `nilai` pada `column`,
+    ditampilkan hanya lewat kolom identitas yang tersedia (NO_URUT/WADMK*/SUMBER_FILE).
+
+    Dipakai untuk konteks "record mana saja yang akan terpengaruh" di UI koreksi —
+    tidak mempengaruhi logika validasi/pencocokan.
+    """
+    text_series = df[column].apply(lambda v: "" if pd.isna(v) else str(v).strip())
+    mask = text_series == nilai
+    identity_columns = get_present_identity_columns(df)
+    return df.loc[mask, identity_columns].reset_index(drop=True)
+
+
 def apply_value_corrections(
     df: pd.DataFrame, corrections: dict[tuple[str, str], str]
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, set[tuple[int, str]]]:
     """Terapkan koreksi ke SEMUA baris yang cocok, per (kolom, nilai_lama) -> nilai_baru.
 
-    Mengembalikan salinan df yang sudah dikoreksi (df asli tidak diubah).
+    Mengembalikan (salinan df yang sudah dikoreksi, set sel yang benar-benar berubah
+    sebagai {(index_baris, kolom), ...}) — dipakai untuk menandai sel yang dikoreksi
+    saat export. df asli tidak diubah.
     """
     corrected = df.copy()
+    changed_cells: set[tuple[int, str]] = set()
+
     for (column, nilai_lama), nilai_baru in corrections.items():
+        if nilai_baru == nilai_lama:
+            continue
         text_series = corrected[column].apply(lambda v: "" if pd.isna(v) else str(v).strip())
         mask = text_series == nilai_lama
+        for row_index in corrected.index[mask]:
+            changed_cells.add((row_index, column))
         corrected.loc[mask, column] = nilai_baru
-    return corrected
+
+    return corrected, changed_cells
 
 
 def split_and_write_back(corrected_df: pd.DataFrame, base_dir: Path = DATA_DIR) -> dict[str, Path]:
@@ -367,6 +405,56 @@ def _style_header_row(worksheet) -> None:
         cell.fill = fill
 
 
+CORRECTED_CELL_FILL = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")
+CORRECTED_CELL_FONT = Font(color="C0392B", bold=True)
+LEGEND_TEXT = (
+    "Sel berwarna kuning dengan teks merah tebal = nilai telah dikoreksi oleh sistem "
+    "dari nilai asli yang tidak sesuai Juknis/Permen ATR No. 1 Tahun 2025."
+)
+
+
+def build_corrected_dataset_excel(df: pd.DataFrame, changed_cells: set[tuple[int, str]]) -> bytes:
+    """Ekspor SELURUH dataset kerja (semua kolom & baris asli) sebagai Excel.
+
+    Struktur & urutan kolom dipertahankan persis seperti file asli (kolom internal
+    _ROW_ASAL tidak diikutkan; SUMBER_FILE tetap disertakan di akhir untuk pelacakan
+    kalau dataset berasal dari gabungan banyak file). Hanya sel yang benar-benar
+    dikoreksi (ada di `changed_cells`) yang diberi warna latar kuning + teks merah
+    tebal, sisanya persis seperti data asli. Sheet "Keterangan" berisi legenda warna.
+    """
+    export_columns = [c for c in df.columns if c not in (SUMBER_FILE_COL, ROW_ASAL_COL)]
+    if SUMBER_FILE_COL in df.columns:
+        export_columns.append(SUMBER_FILE_COL)
+
+    row_labels = list(df.index)
+    export_df = df[export_columns].reset_index(drop=True)
+    column_positions = {name: idx + 1 for idx, name in enumerate(export_columns)}
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Hasil_Koreksi")
+        worksheet = writer.sheets["Hasil_Koreksi"]
+        _style_header_row(worksheet)
+
+        for position, row_label in enumerate(row_labels):
+            excel_row = position + 2  # baris 1 = header
+            for column_name in export_columns:
+                if (row_label, column_name) in changed_cells:
+                    cell = worksheet.cell(row=excel_row, column=column_positions[column_name])
+                    cell.fill = CORRECTED_CELL_FILL
+                    cell.font = CORRECTED_CELL_FONT
+
+        legend_sheet = writer.book.create_sheet("Keterangan")
+        legend_sheet["A1"] = "Keterangan"
+        legend_sheet["A1"].font = Font(bold=True)
+        legend_sheet["A2"] = LEGEND_TEXT
+        legend_sheet["A2"].alignment = Alignment(wrap_text=True)
+        legend_sheet.column_dimensions["A"].width = 100
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def build_discrepancy_report_excel(result: MergedValidationResult, df: pd.DataFrame) -> bytes:
     """Susun laporan diskrepansi jadi Excel 2 sheet:
 
@@ -400,6 +488,10 @@ def build_discrepancy_report_excel(result: MergedValidationResult, df: pd.DataFr
         ],
     )
 
+    # Kolom identitas (NO_URUT/WADMK*) yang ada di data, dipakai supaya laporan bisa
+    # langsung di-join balik ke file asli tanpa perlu buka aplikasi ini lagi.
+    identity_columns = [c for c in IDENTITY_COLUMNS if c in df.columns]
+
     manual_rows = []
     for cs in result.column_stats:
         salah_total_values = {
@@ -411,22 +503,28 @@ def build_discrepancy_report_excel(result: MergedValidationResult, df: pd.DataFr
         text_series = df[cs.column].apply(lambda v: "" if pd.isna(v) else str(v).strip())
         mask = text_series.isin(salah_total_values)
         for idx in df.index[mask]:
-            manual_rows.append(
+            row = {
+                "SUMBER_FILE": df.at[idx, SUMBER_FILE_COL] if SUMBER_FILE_COL in df.columns else "-",
+                "Baris": (int(df.at[idx, ROW_ASAL_COL]) if ROW_ASAL_COL in df.columns else int(idx)) + 1,
+            }
+            for identity_col in identity_columns:
+                row[identity_col] = df.at[idx, identity_col]
+            row.update(
                 {
-                    "SUMBER_FILE": df.at[idx, SUMBER_FILE_COL] if SUMBER_FILE_COL in df.columns else "-",
-                    "Baris": (int(df.at[idx, ROW_ASAL_COL]) if ROW_ASAL_COL in df.columns else int(idx)) + 1,
                     "Nama_IGT": cs.nama_igt,
                     "KOLOM_BERMASALAH": cs.column,
                     "Nilai_Saat_Ini": display_value(text_series.loc[idx]),
                     "DETAIL_KATEGORI_ERROR": KATEGORI_SALAH_TOTAL,
                 }
             )
+            manual_rows.append(row)
 
     manual_df = pd.DataFrame(
         manual_rows,
         columns=[
             "SUMBER_FILE",
             "Baris",
+            *identity_columns,
             "Nama_IGT",
             "KOLOM_BERMASALAH",
             "Nilai_Saat_Ini",

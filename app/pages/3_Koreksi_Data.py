@@ -2,18 +2,22 @@
 
 Beroperasi di atas dataset kerja aktif di st.session_state (dibuat lewat halaman
 Validasi Data, atau otomatis dimuat dari folder data/ kalau belum ada). Setelah
-koreksi diterapkan, dataset kerja diperbarui supaya halaman lain tetap konsisten.
+koreksi diterapkan, dataset kerja diperbarui supaya halaman lain tetap konsisten,
+dan sel yang dikoreksi diakumulasi supaya bisa diunduh dengan penandaan warna.
 """
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import streamlit as st
 
+from app.core.igt_config import slugify
 from app.core.rules_manager import build_ri_ruleset_lookup
 from app.core.session_state import (
+    SS_CHANGED_CELLS,
     SS_DATA_SOURCE,
     SS_LAST_VERIFICATION,
     SS_MERGED_DF,
@@ -24,8 +28,11 @@ from app.core.session_state import (
 )
 from app.core.validator import (
     apply_value_corrections,
+    build_corrected_dataset_excel,
     display_value,
+    get_context_rows_for_value,
     get_invalid_value_groups,
+    get_present_identity_columns,
     list_data_files,
     load_and_merge_data_files,
     split_and_write_back,
@@ -85,9 +92,26 @@ if st.session_state[SS_LAST_VERIFICATION] is not None:
             st.warning(f"{nama_igt} / `{column}`: masih ada **{sisa}** nilai unik yang belum cocok.")
     st.divider()
 
+if st.session_state[SS_CHANGED_CELLS]:
+    dataset_label = sumber_files[0].rsplit(".", 1)[0] if len(sumber_files) == 1 else f"gabungan_{len(sumber_files)}_file"
+    file_name = f"hasil_koreksi_{slugify(dataset_label)}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    st.download_button(
+        label="⬇️ Download Hasil Koreksi (Excel, seluruh dataset)",
+        data=build_corrected_dataset_excel(merged_df, st.session_state[SS_CHANGED_CELLS]),
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.caption(
+        f"Berisi seluruh {len(merged_df)} record & semua kolom asli — sel yang dikoreksi sistem "
+        "ditandai kuning (lihat sheet 'Keterangan' untuk detail warna)."
+    )
+    st.divider()
+
 if not groups:
     st.success("Tidak ada nilai salah untuk kolom Rinci yang punya ruleset aktif di dataset ini.")
     st.stop()
+
+identity_columns = get_present_identity_columns(merged_df)
 
 st.subheader(f"Nilai Salah yang Perlu Dikoreksi ({len(groups)})")
 
@@ -124,6 +148,11 @@ for i, group in enumerate(groups):
         placeholder="Ketik nilai yang benar",
     )
 
+    if identity_columns:
+        with st.expander(f"Lihat {group.frekuensi} baris terdampak (NO_URUT / wilayah administrasi)"):
+            context_df = get_context_rows_for_value(merged_df, group.column, group.nilai_saat_ini)
+            st.dataframe(context_df, use_container_width=True, hide_index=True)
+
 st.divider()
 
 if st.button("Terapkan Koreksi", type="primary"):
@@ -146,7 +175,7 @@ if st.button("Terapkan Koreksi", type="primary"):
     if not corrections:
         st.warning("Tidak ada koreksi yang dipilih. Pilih kandidat atau isi input manual terlebih dahulu.")
     else:
-        corrected_df = apply_value_corrections(merged_df, corrections)
+        corrected_df, changed_cells = apply_value_corrections(merged_df, corrections)
         saved = split_and_write_back(corrected_df)
 
         verifikasi = verify_after_correction(corrected_df, ri_lookup=lookup)
@@ -154,6 +183,7 @@ if st.button("Terapkan Koreksi", type="primary"):
         st.session_state[SS_MERGED_DF] = corrected_df
         st.session_state[SS_VALIDATION_RESULT] = validate_merged_dataframe(corrected_df, ri_lookup=lookup)
         st.session_state[SS_LAST_VERIFICATION] = verifikasi
+        st.session_state[SS_CHANGED_CELLS] = st.session_state[SS_CHANGED_CELLS] | changed_cells
 
         for group_key in list(st.session_state.keys()):
             if group_key.startswith("select_") or group_key.startswith("manual_"):
