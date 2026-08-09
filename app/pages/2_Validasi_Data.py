@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import streamlit as st
 
+from app.core.igt_config import get_igt_style, load_igt_list
 from app.core.rules_manager import build_ri_ruleset_lookup
 from app.core.session_state import (
     SS_CHANGED_CELLS,
@@ -109,8 +110,10 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
+igt_list = load_igt_list()
 for cs in result.column_stats:
-    with st.expander(f"{cs.nama_igt} — kolom `{cs.column}`", expanded=True):
+    icon, _bg, _fg = get_igt_style(cs.nama_igt, igt_list)
+    with st.expander(f"{icon} {cs.nama_igt} — kolom `{cs.column}`", expanded=True):
         if not cs.ruleset_tersedia:
             st.warning(
                 f"IGT '{cs.nama_igt}' belum punya ruleset aktif — seluruh {cs.total_checked} "

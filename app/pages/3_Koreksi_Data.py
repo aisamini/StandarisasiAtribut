@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import streamlit as st
 
-from app.core.igt_config import slugify
+from app.core.igt_config import get_igt_style, load_igt_list, slugify
 from app.core.rules_manager import build_ri_ruleset_lookup
 from app.core.session_state import (
     SS_CHANGED_CELLS,
@@ -112,38 +112,62 @@ if not groups:
     st.stop()
 
 identity_columns = get_present_identity_columns(merged_df)
+igt_list = load_igt_list()
 
 st.subheader(f"Nilai Salah yang Perlu Dikoreksi ({len(groups)})")
+st.caption(
+    "Kandidat dengan skor kemiripan tertinggi sudah otomatis terpilih di dropdown — "
+    "tinggal cek sekilas lalu klik **Terapkan Koreksi**, atau ganti pilihan/isi manual "
+    "untuk baris yang memang tidak cocok."
+)
 
-header = st.columns([2, 3, 1, 1, 3, 3])
-header[0].markdown("**IGT / Kolom**")
-header[1].markdown("**Nilai Saat Ini**")
-header[2].markdown("**Frekuensi**")
-header[3].markdown("**Kategori**")
-header[4].markdown("**Pilih Kandidat**")
-header[5].markdown("**Atau Ketik Manual (prioritas)**")
+header_cols = [3, 1, 1, 3, 3]
+current_group_key = None
 
 for i, group in enumerate(groups):
-    row = st.columns([2, 3, 1, 1, 3, 3])
-    row[0].write(f"{group.nama_igt}\n\n`{group.column}`")
-    row[1].write(display_value(group.nilai_saat_ini))
-    row[2].write(group.frekuensi)
-    row[3].write(group.kategori)
+    group_header_key = (group.nama_igt, group.column)
+    if group_header_key != current_group_key:
+        current_group_key = group_header_key
+        icon, bg_color, text_color = get_igt_style(group.nama_igt, igt_list)
+        st.markdown(
+            f"""<div style="background-color:{bg_color}; padding:10px 16px;
+            border-radius:8px; margin:18px 0 8px 0;">
+            <span style="font-size:1.25em; font-weight:700; color:{text_color};">
+            {icon} {group.nama_igt}</span><br>
+            <span style="font-size:0.85em; color:{text_color}; opacity:0.85;">
+            Kolom: {group.column}</span></div>""",
+            unsafe_allow_html=True,
+        )
+        header = st.columns(header_cols)
+        header[0].markdown("**Nilai Saat Ini**")
+        header[1].markdown("**Frekuensi**")
+        header[2].markdown("**Kategori**")
+        header[3].markdown("**Pilih Kandidat**")
+        header[4].markdown("**Atau Ketik Manual (prioritas)**")
+
+    row = st.columns(header_cols)
+    row[0].write(display_value(group.nilai_saat_ini))
+    row[1].write(group.frekuensi)
+    row[2].write(group.kategori)
 
     group_key = f"{group.column}_{i}"
-    option_values = [TIDAK_DIUBAH, *[c["nilai"] for c in group.kandidat]]
+    # Kandidat skor tertinggi (urutan pertama) di paling atas & jadi default (index=0);
+    # "-- Tidak diubah --" tetap tersedia di paling bawah untuk dipilih sadar oleh user.
+    # Kalau tidak ada kandidat sama sekali, satu-satunya opsi adalah "Tidak diubah".
+    option_values = [*[c["nilai"] for c in group.kandidat], TIDAK_DIUBAH]
     option_display = {TIDAK_DIUBAH: "-- Tidak diubah --"}
     for c in group.kandidat:
         option_display[c["nilai"]] = f"{c['nilai']} ({c['skor_persen']}%)"
 
-    row[4].selectbox(
+    row[3].selectbox(
         "Pilih kandidat",
         options=option_values,
+        index=0,
         key=f"select_{group_key}",
         format_func=lambda v, option_display=option_display: option_display[v],
         label_visibility="collapsed",
     )
-    row[5].text_input(
+    row[4].text_input(
         "Manual", key=f"manual_{group_key}", label_visibility="collapsed",
         placeholder="Ketik nilai yang benar",
     )

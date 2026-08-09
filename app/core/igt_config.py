@@ -27,6 +27,20 @@ DEFAULT_IGT_LIST = [
     {"nama_igt": "Penguasaan Tanah", "prefix": "psn"},
 ]
 
+# (ikon, warna_latar, warna_teks) per IGT — dipilih berdasarkan urutan di konfigurasi
+# supaya konsisten & berbeda per IGT (termasuk IGT baru yang ditambahkan lewat UI),
+# tanpa mengubah kode saat daftar IGT bertambah (siklus ulang kalau IGT > jumlah palet).
+IGT_STYLE_PALETTE = [
+    ("📋", "#E3F2FD", "#1565C0"),
+    ("🌾", "#E8F5E9", "#2E7D32"),
+    ("🏘️", "#FFF3E0", "#EF6C00"),
+    ("🏛️", "#F3E5F5", "#6A1B9A"),
+    ("🌊", "#E0F7FA", "#00838F"),
+    ("📌", "#FCE4EC", "#AD1457"),
+    ("🗂️", "#FFFDE7", "#9E9D24"),
+    ("📍", "#EFEBE9", "#4E342E"),
+]
+
 
 class IgtConfigError(Exception):
     """Dilempar saat menambah IGT baru gagal (nama/prefix tidak valid atau sudah dipakai)."""
@@ -89,6 +103,16 @@ def add_igt(nama_igt: str, prefix: str) -> list[dict]:
     igt_list.append({"nama_igt": nama_igt, "prefix": prefix})
     save_igt_list(igt_list)
     return igt_list
+
+
+def get_igt_style(nama_igt: str, igt_list: list[dict] | None = None) -> tuple[str, str, str]:
+    """(ikon, warna_latar, warna_teks) untuk satu IGT — konsisten selama urutan
+    konfigurasi tidak berubah, berbeda-beda antar IGT (siklus kalau IGT lebih
+    banyak dari jumlah palet)."""
+    igt_list = igt_list if igt_list is not None else load_igt_list()
+    names = [item["nama_igt"] for item in igt_list]
+    index = names.index(nama_igt) if nama_igt in names else 0
+    return IGT_STYLE_PALETTE[index % len(IGT_STYLE_PALETTE)]
 
 
 def get_ri_column(prefix: str) -> str:
