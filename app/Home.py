@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.rules_manager import get_active_rules_summary
-from app.core.validator import run_validation_for_all_categories
+from app.core.validator import run_validation_for_all_categories, save_validation_snapshot
 
 st.set_page_config(page_title="Validasi Data Spasial IGT P4T", page_icon="🗺️", layout="wide")
 
@@ -30,6 +30,7 @@ st.divider()
 
 st.subheader("Ringkasan Hasil Validasi Data")
 results, categories_missing_data, categories_missing_rules = run_validation_for_all_categories()
+snapshot_path = save_validation_snapshot(results, categories_missing_data, categories_missing_rules)
 
 if categories_missing_rules:
     st.warning(
@@ -47,6 +48,10 @@ if categories_missing_data:
 if not results:
     st.info("Belum ada hasil validasi. Pastikan ada file data di `data/` yang cocok dengan kategori beruleset aktif.")
 else:
+    st.caption(
+        f"Hasil validasi beserta kandidat koreksi disimpan di `output/{snapshot_path.name}` "
+        "untuk dipakai antarmuka koreksi."
+    )
     for category, result in sorted(results.items()):
         with st.expander(
             f"{category}  —  {result.total_records} record  (file: {result.data_file})",
@@ -77,15 +82,30 @@ else:
                     if not attr_result.invalid_value_counts:
                         continue
                     st.caption(f"Nilai tidak valid untuk atribut **{attribute}**:")
-                    invalid_df = pd.DataFrame(
-                        sorted(
-                            attr_result.invalid_value_counts.items(),
-                            key=lambda kv: kv[1],
-                            reverse=True,
-                        ),
-                        columns=["Nilai", "Frekuensi"],
+                    invalid_rows = []
+                    for value, freq in sorted(
+                        attr_result.invalid_value_counts.items(),
+                        key=lambda kv: kv[1],
+                        reverse=True,
+                    ):
+                        candidates = attr_result.suggestions.get(value, [])
+                        candidates_str = (
+                            ", ".join(
+                                f"{c['nilai']} ({c['skor_persen']}%)" for c in candidates
+                            )
+                            if candidates
+                            else "-"
+                        )
+                        invalid_rows.append(
+                            {
+                                "Nilai": value,
+                                "Frekuensi": freq,
+                                "Top-3 Kandidat Pengganti (skor)": candidates_str,
+                            }
+                        )
+                    st.dataframe(
+                        pd.DataFrame(invalid_rows), use_container_width=True, hide_index=True
                     )
-                    st.dataframe(invalid_df, use_container_width=True, hide_index=True)
 
             if result.attributes_not_in_data:
                 st.warning(
