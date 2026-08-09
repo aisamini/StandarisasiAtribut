@@ -156,6 +156,19 @@ def load_active_rules_for_category(category: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def get_expected_attributes(category: str) -> list[str]:
+    """Daftar nama atribut yang diharapkan (kolom wajib) untuk satu kategori IGT."""
+    rules_df = load_active_rules_for_category(category)
+    if rules_df.empty:
+        return []
+    return sorted(rules_df["Nama_Atribut"].dropna().astype(str).str.strip().unique().tolist())
+
+
+def get_active_categories() -> list[str]:
+    """Daftar kategori IGT yang memiliki ruleset aktif."""
+    return sorted(_load_metadata().keys())
+
+
 def load_all_active_rules() -> pd.DataFrame:
     """Muat seluruh ruleset aktif dari semua kategori menjadi satu DataFrame."""
     metadata = _load_metadata()
