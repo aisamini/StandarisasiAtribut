@@ -3,6 +3,9 @@
 Aplikasi Streamlit untuk validasi data spasial IGT P4T (Informasi Geospasial Tematik
 Penatagunaan dan Penguasaan Tanah) terhadap ruleset atribut standar.
 
+> Bukan orang teknis / baru pertama kali pakai? Lihat **[CARA_PAKAI.md](CARA_PAKAI.md)**
+> untuk panduan menjalankan aplikasi cukup dengan 1 perintah.
+
 ## Struktur Proyek
 
 ```
@@ -17,6 +20,15 @@ output/             Hasil laporan validasi
 ```
 
 ## Menjalankan Aplikasi
+
+Cara cepat (install dependency + jalankan sekaligus):
+
+```bash
+./run.sh          # Mac/Linux
+run.bat           # Windows (klik dua kali, atau jalankan dari Command Prompt)
+```
+
+Atau manual:
 
 ```bash
 pip install -r requirements.txt
