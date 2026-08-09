@@ -1,10 +1,10 @@
-"""Konfigurasi daftar IGT P4T (nama + prefix kolom) dan pola nama kolom bakunya.
+"""Konfigurasi daftar IGT P4T (nama + prefix kolom) dan pola nama kolom Rinci bakunya.
 
-Nama kolom ruleset TIDAK distandarisasi ke skema generik — harus persis memakai
-nama asli sesuai Permen ATR No. 1 Tahun 2025, karena langsung dipakai pengolah data.
-Setiap IGT punya prefix kolom sendiri, tapi pola sufiks level selalu sama:
-KC=Kecil, MN=Menengah, BS=Besar, RI=Rinci. Tiap level punya 2 kolom: nama kategori
-(mis. "pfnObjRI") dan kode (mis. "idpfnObjRI", prefix "id" + nama kolom).
+Data spasial P4T di lapangan hanya punya SATU kolom atribut relevan per IGT: level
+Rinci, bernama "[PREFIX]OBJRI" — huruf besar semua, konsisten dengan nama kolom asli
+di data spasial (mis. "PTNOBJRI" untuk Penggunaan Tanah, prefix "ptn"). Perbandingan
+nama kolom selalu case-insensitive (terima "ptnObjRI", "PTNOBJRI", dst — semua
+dianggap sama dan distandarisasi jadi huruf besar).
 
 Daftar IGT disimpan di rules/igt_config.json sehingga bisa ditambah lewat UI
 ("+ Tambah IGT Baru") tanpa mengubah kode.
@@ -18,8 +18,7 @@ from typing import Iterable
 
 from app.config import IGT_CONFIG_PATH
 
-LEVELS = ["KC", "MN", "BS", "RI"]
-LEVEL_NAMES = {"KC": "Kecil", "MN": "Menengah", "BS": "Besar", "RI": "Rinci"}
+RI_SUFFIX = "OBJRI"
 
 DEFAULT_IGT_LIST = [
     {"nama_igt": "Penggunaan Tanah", "prefix": "ptn"},
@@ -92,34 +91,18 @@ def add_igt(nama_igt: str, prefix: str) -> list[dict]:
     return igt_list
 
 
-def get_name_col(prefix: str, level: str) -> str:
-    """Nama kolom kategori untuk prefix+level, mis. get_name_col('ptn','KC') -> 'ptnObjKC'."""
-    return f"{prefix}Obj{level}"
-
-
-def get_code_col(prefix: str, level: str) -> str:
-    """Nama kolom kode untuk prefix+level, mis. get_code_col('ptn','KC') -> 'idptnObjKC'."""
-    return f"id{prefix}Obj{level}"
-
-
-def get_igt_columns(prefix: str) -> list[str]:
-    """8 kolom baku (nama+kode x 4 level) untuk satu prefix IGT, urut KC, MN, BS, RI."""
-    columns: list[str] = []
-    for level in LEVELS:
-        columns.append(get_name_col(prefix, level))
-        columns.append(get_code_col(prefix, level))
-    return columns
+def get_ri_column(prefix: str) -> str:
+    """Nama kolom Rinci baku (huruf besar) untuk satu prefix, mis. get_ri_column('ptn') -> 'PTNOBJRI'."""
+    return f"{prefix.upper()}{RI_SUFFIX}"
 
 
 def detect_igt_ri_columns(
     columns: Iterable[str], igt_list: list[dict] | None = None
 ) -> list[dict]:
-    """Deteksi kolom level Rinci ("[prefix]ObjRI") IGT mana saja yang ada di `columns`.
+    """Deteksi kolom Rinci ("[PREFIX]OBJRI") IGT mana saja yang ada di `columns`.
 
-    Data spasial P4T di lapangan hanya punya kolom level Rinci per IGT (mis. "PTNOBJRI"),
-    tanpa kolom terpisah untuk Besar/Menengah/Kecil, dan sering seluruhnya huruf besar —
-    jadi perbandingan nama kolom dilakukan case-insensitive. Mengembalikan
-    list of {"nama_igt", "prefix", "column"} (nama kolom asli sesuai `columns`).
+    Perbandingan case-insensitive. Mengembalikan list of {"nama_igt", "prefix",
+    "column" (nama baku huruf besar), "source_column" (nama asli persis di `columns`)}.
     """
     igt_list = igt_list if igt_list is not None else load_igt_list()
     columns_by_upper: dict[str, str] = {str(c).upper(): c for c in columns}
@@ -127,13 +110,14 @@ def detect_igt_ri_columns(
 
     for item in igt_list:
         nama_igt, prefix = item["nama_igt"], item["prefix"]
-        expected = get_name_col(prefix, "RI").upper()
+        expected = get_ri_column(prefix)
         if expected in columns_by_upper:
             matches.append(
                 {
                     "nama_igt": nama_igt,
                     "prefix": prefix,
-                    "column": columns_by_upper[expected],
+                    "column": expected,
+                    "source_column": columns_by_upper[expected],
                 }
             )
 

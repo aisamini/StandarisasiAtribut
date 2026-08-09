@@ -10,23 +10,24 @@ generik) karena langsung dipakai pengolah data.
 
 ## Konsep Kolom IGT
 
-Setiap IGT (mis. Penggunaan Tanah, prefix `ptn`) punya 8 kolom baku: nama kategori +
-kode untuk masing-masing 4 level (KC=Kecil, MN=Menengah, BS=Besar, RI=Rinci), contoh:
-`ptnObjKC`, `idptnObjKC`, `ptnObjMN`, `idptnObjMN`, dst. Daftar IGT dan prefix-nya
-dikonfigurasi di `rules/igt_config.json` dan bisa ditambah lewat UI (halaman
-**Kelola Aturan** → "+ Tambah IGT Baru") tanpa mengubah kode.
+Setiap IGT (mis. Penggunaan Tanah, prefix `ptn`) punya SATU kolom atribut relevan:
+level Rinci, bernama `[PREFIX]OBJRI` — huruf besar semua, konsisten dengan nama kolom
+asli di data spasial P4T (mis. `PTNOBJRI`). Perbandingan nama kolom selalu
+case-insensitive (`ptnObjRI`, `PTNOBJRI`, `PtnObjRI` dianggap sama). Daftar IGT dan
+prefix-nya dikonfigurasi di `rules/igt_config.json` dan bisa ditambah lewat UI
+(halaman **Kelola Aturan** → "+ Tambah IGT Baru") tanpa mengubah kode.
 
 ## Struktur Proyek
 
 ```
-data/               Input data spasial (DBF/SHP/CSV) yang akan divalidasi
+data/               Input data spasial (DBF/SHP/CSV/XLSX) yang akan divalidasi
 rules/igt_config.json  Daftar IGT (nama + prefix kolom) — sumber kebenaran validasi
-rules/active/       Ruleset yang sedang dipakai, satu file CSV per IGT (4 level sekaligus)
+rules/active/       Ruleset yang sedang dipakai, satu file CSV berisi daftar nilai valid per IGT
 rules/archive/      Arsip riwayat upload ruleset, bertimestamp
 app/                Logika utama aplikasi (Streamlit)
   Home.py           Halaman utama
   pages/            Halaman-halaman tambahan (mis. Kelola Aturan)
-  core/             Modul logika (io_utils, igt_config, rules_manager, validator)
+  core/             Modul logika (io_utils, igt_config, rules_manager, validator, session_state)
 output/             Hasil laporan validasi
 ```
 
@@ -51,27 +52,26 @@ streamlit run app/Home.py
 Halaman `Kelola Aturan` (di sidebar) memungkinkan:
 
 1. Memilih IGT dari daftar terkonfigurasi, atau menambah IGT baru (nama + prefix kolom).
-2. Mengunduh template Excel khusus IGT yang dipilih (8 kolom sesuai prefix-nya, plus 1 baris contoh).
-3. Mengunggah ruleset lengkap (4 level sekaligus) untuk IGT tersebut — validasi otomatis
-   memastikan 8 kolom persis sesuai (case-sensitive), file ditolak dengan pesan error jelas
-   jika tidak sesuai.
+2. Mengunduh template Excel khusus IGT yang dipilih (1 kolom Rinci baku, plus contoh nilai).
+3. Mengunggah daftar nilai valid untuk IGT tersebut — sistem hanya mencari SATU kolom
+   yang relevan (case-insensitive), kolom lain di file (mis. `NO_URUT`, `WADMKK`) diabaikan.
+   Validasi hanya gagal kalau kolom itu benar-benar tidak ditemukan di file.
 4. Jika valid, file diarsipkan (bertimestamp + nama IGT) ke `rules/archive/`, lalu ruleset
    aktif IGT itu **digantikan seluruhnya** (IGT lain tidak berubah).
-5. Menampilkan tabel ringkasan ruleset per IGT: status ada/belum, jumlah baris per level,
-   dan tanggal terakhir diupdate.
+5. Menampilkan tabel ringkasan ruleset per IGT: kolom, status ada/belum, jumlah nilai
+   valid, dan tanggal terakhir diupdate.
 
 ## Validasi Data & Koreksi
-
-Data spasial P4T di lapangan hanya punya kolom level **Rinci** per IGT (mis.
-`PTNOBJRI`, sering seluruhnya huruf besar) — jadi validasi hanya mencocokkan kolom itu
-ke daftar nilai valid `[prefix]ObjRI` di ruleset IGT terkait (perbandingan nama kolom
-case-insensitive). Kolom Besar/Menengah/Kecil di ruleset tetap tersimpan untuk
-referensi tapi tidak dipakai untuk pencocokan otomatis ini.
 
 Banyak file data bisa digabung jadi satu dataset sebelum divalidasi — halaman
 **Home** otomatis menggabungkan semua file di `data/`, atau unggah banyak file
 sekaligus lewat halaman **Validasi Data**. Kolom `SUMBER_FILE` menandai file asal
 tiap baris untuk pelacakan.
+
+Dataset gabungan, hasil validasi, dan status koreksi tersimpan di `st.session_state`
+sehingga tetap ada saat pindah antar halaman **Validasi Data** ↔ **Koreksi Data**
+(tidak perlu upload ulang) — sampai file baru diunggah atau tombol **Reset / Mulai
+Ulang** ditekan.
 
 Tiap nilai salah diklasifikasikan **Salah Total** (kosong/dummy/kata kunci error/teks
 < 3 karakter) atau **Typo** (kemungkinan cuma salah ketik). Kandidat koreksi

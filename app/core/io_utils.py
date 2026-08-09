@@ -24,7 +24,7 @@ class DataWriteError(Exception):
     """Dilempar saat hasil koreksi tidak bisa ditulis langsung ke format file aslinya."""
 
 
-SUPPORTED_EXTENSIONS = (".dbf", ".shp", ".csv")
+SUPPORTED_EXTENSIONS = (".dbf", ".shp", ".csv", ".xlsx")
 
 
 def read_dbf(path: str | Path) -> pd.DataFrame:
@@ -65,8 +65,23 @@ def read_csv(path: str | Path) -> pd.DataFrame:
         raise DataReadError(f"Gagal membaca file CSV '{path.name}': {exc}") from exc
 
 
+def read_excel(path: str | Path) -> pd.DataFrame:
+    """Baca tabel atribut dari file .xlsx.
+
+    Melempar DataReadError dengan pesan jelas jika file tidak ada atau gagal dibaca.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise DataReadError(f"File Excel tidak ditemukan: {path}")
+
+    try:
+        return pd.read_excel(path)
+    except Exception as exc:  # noqa: BLE001
+        raise DataReadError(f"Gagal membaca file Excel '{path.name}': {exc}") from exc
+
+
 def read_attribute_table(path: str | Path) -> pd.DataFrame:
-    """Baca tabel atribut otomatis berdasarkan ekstensi file (.dbf/.shp/.csv).
+    """Baca tabel atribut otomatis berdasarkan ekstensi file (.dbf/.shp/.csv/.xlsx).
 
     Untuk .shp, tabel atribut diambil dari file .dbf pendamping dengan nama yang sama.
     Melempar DataReadError dengan pesan jelas jika format tidak didukung atau file
@@ -92,6 +107,9 @@ def read_attribute_table(path: str | Path) -> pd.DataFrame:
                 f"Pastikan file '{dbf_path.name}' berada di folder yang sama."
             )
         return read_dbf(dbf_path)
+
+    if suffix == ".xlsx":
+        return read_excel(path)
 
     return read_csv(path)
 
@@ -237,14 +255,24 @@ def write_attribute_table(path: str | Path, df: pd.DataFrame) -> Path:
     if suffix == ".shp":
         return write_dbf(path.with_suffix(".dbf"), df)
 
+    if suffix == ".xlsx":
+        return write_excel(path, df)
+
     raise DataWriteError(
         f"Menyimpan langsung ke format '{suffix}' belum didukung. "
-        f"Format yang didukung: .csv, .dbf, .shp (menulis .dbf pendamping)."
+        f"Format yang didukung: .csv, .dbf, .shp (menulis .dbf pendamping), .xlsx."
     )
 
 
+def write_excel(path: str | Path, df: pd.DataFrame) -> Path:
+    """Tulis DataFrame ke file .xlsx."""
+    path = Path(path)
+    df.to_excel(path, index=False)
+    return path
+
+
 def export_attribute_table_bytes(df: pd.DataFrame, suffix: str) -> bytes:
-    """Tulis DataFrame ke file sementara (.csv atau .dbf) lalu kembalikan isinya sebagai bytes.
+    """Tulis DataFrame ke file sementara (.csv/.dbf/.xlsx) lalu kembalikan isinya sebagai bytes.
 
     Dipakai untuk membuat konten tombol download Streamlit (mis. hasil koreksi)
     tanpa perlu menyimpan file permanen di disk. Untuk data yang berasal dari
@@ -256,7 +284,7 @@ def export_attribute_table_bytes(df: pd.DataFrame, suffix: str) -> bytes:
         suffix = f".{suffix}"
     if suffix == ".shp":
         suffix = ".dbf"
-    if suffix not in (".csv", ".dbf"):
+    if suffix not in (".csv", ".dbf", ".xlsx"):
         raise DataWriteError(f"Format export '{suffix}' tidak didukung untuk unduhan langsung.")
 
     with tempfile.TemporaryDirectory() as tmp_dir:

@@ -1,8 +1,9 @@
 """Pengelolaan ruleset atribut IGT P4T: template per IGT, validasi upload, arsip, dan ruleset aktif.
 
-Satu file ruleset = satu IGT lengkap (4 level: KC/MN/BS/RI sekaligus), dengan nama
-kolom persis sesuai Permen ATR No. 1 Tahun 2025 (lihat app/core/igt_config.py).
-Upload baru untuk IGT yang sama MENGGANTI SELURUH ruleset IGT itu (bukan digabung).
+Ruleset per IGT hanya berisi SATU kolom yang relevan: nilai valid level Rinci
+("[PREFIX]OBJRI", huruf besar — lihat app/core/igt_config.py). Saat upload, kolom
+itu dicari case-insensitive; kolom lain di file yang diupload diabaikan saja (tidak
+dianggap error). Upload baru untuk IGT yang sama MENGGANTI SELURUH ruleset IGT itu.
 """
 
 from __future__ import annotations
@@ -15,30 +16,29 @@ from pathlib import Path
 import pandas as pd
 
 from app.config import RULES_ACTIVE_DIR, RULES_ARCHIVE_DIR, RULES_METADATA_PATH
-from app.core.igt_config import (
-    LEVELS,
-    get_code_col,
-    get_igt_columns,
-    get_name_col,
-    get_prefix,
-    load_igt_list,
-    slugify,
-)
+from app.core.igt_config import get_prefix, get_ri_column, load_igt_list, slugify
 
-EXAMPLE_ROW_VALUES = {
-    "KC": ("Contoh Kategori Kecil", "1"),
-    "MN": ("Contoh Kategori Menengah", "1.1"),
-    "BS": ("Contoh Kategori Besar", "1.1.1"),
-    "RI": ("Contoh Kategori Rinci", "1.1.1.1"),
-}
+EXAMPLE_VALUES = ["Contoh Kategori Rinci 1", "Contoh Kategori Rinci 2"]
 
 
 class RulesValidationError(Exception):
-    """Dilempar saat file ruleset yang diupload tidak sesuai template IGT terkait."""
+    """Dilempar saat kolom Rinci yang relevan tidak ditemukan di file ruleset yang diupload."""
+
+
+def find_ri_column(df: pd.DataFrame, nama_igt: str) -> str | None:
+    """Cari kolom Rinci IGT tsb di df, case-insensitive. Return nama kolom ASLI di df, atau None."""
+    prefix = get_prefix(nama_igt)
+    if prefix is None:
+        return None
+    expected = get_ri_column(prefix)
+    for column in df.columns:
+        if str(column).strip().upper() == expected:
+            return column
+    return None
 
 
 def build_template_for_igt(nama_igt: str) -> bytes:
-    """Buat file Excel template untuk satu IGT: 8 kolom baku + 1 baris contoh.
+    """Buat file Excel template untuk satu IGT: 1 kolom Rinci baku + beberapa baris contoh.
 
     Melempar ValueError kalau nama_igt tidak terdaftar di konfigurasi.
     """
@@ -46,14 +46,8 @@ def build_template_for_igt(nama_igt: str) -> bytes:
     if prefix is None:
         raise ValueError(f"IGT '{nama_igt}' tidak terdaftar di konfigurasi.")
 
-    columns = get_igt_columns(prefix)
-    example_row = {}
-    for level in LEVELS:
-        nama_contoh, kode_contoh = EXAMPLE_ROW_VALUES[level]
-        example_row[get_name_col(prefix, level)] = nama_contoh
-        example_row[get_code_col(prefix, level)] = kode_contoh
-
-    df = pd.DataFrame([example_row], columns=columns)
+    column = get_ri_column(prefix)
+    df = pd.DataFrame({column: EXAMPLE_VALUES})
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Ruleset")
@@ -61,35 +55,32 @@ def build_template_for_igt(nama_igt: str) -> bytes:
     return buffer.getvalue()
 
 
-def validate_ruleset_columns(df: pd.DataFrame, nama_igt: str) -> None:
-    """Pastikan kolom file yang diupload persis sesuai 8 kolom baku IGT tsb (case-sensitive).
+def validate_ruleset_columns(df: pd.DataFrame, nama_igt: str) -> str:
+    """Pastikan kolom Rinci yang relevan untuk IGT tsb ada di df (case-insensitive).
 
-    Melempar RulesValidationError dengan pesan jelas jika tidak sesuai.
+    Kolom lain di df diabaikan (bukan error). Melempar RulesValidationError dengan
+    pesan jelas (sebutkan nama kolom yang dicari) kalau kolom itu tidak ditemukan
+    sama sekali, atau kalau file kosong. Mengembalikan nama kolom ASLI yang ditemukan.
     """
     prefix = get_prefix(nama_igt)
     if prefix is None:
         raise RulesValidationError(f"IGT '{nama_igt}' tidak terdaftar di konfigurasi.")
 
-    expected_columns = get_igt_columns(prefix)
-    actual_columns = list(df.columns)
+    expected = get_ri_column(prefix)
+    found_column = find_ri_column(df, nama_igt)
 
-    missing = [c for c in expected_columns if c not in actual_columns]
-    extra = [c for c in actual_columns if c not in expected_columns]
-
-    if missing or extra:
-        parts = []
-        if missing:
-            parts.append(f"kolom hilang: {', '.join(missing)}")
-        if extra:
-            parts.append(f"kolom tidak dikenal: {', '.join(extra)}")
+    if found_column is None:
+        found_list = ", ".join(str(c) for c in df.columns) if len(df.columns) else "(tidak ada)"
         raise RulesValidationError(
-            f"File tidak sesuai template IGT '{nama_igt}'. Kolom yang diharapkan (persis, "
-            f"case-sensitive): {', '.join(expected_columns)}. Ditemukan {', '.join(parts)}. "
-            "Silakan unduh ulang template dan sesuaikan file Anda."
+            f"Kolom '{expected}' tidak ditemukan di file yang diupload untuk IGT '{nama_igt}'. "
+            f"Kolom yang ditemukan pada file: {found_list}. Pastikan file memiliki kolom ini "
+            "(nama kolom tidak harus persis huruf besar/kecil)."
         )
 
     if df.empty:
         raise RulesValidationError("File ruleset kosong, tidak ada baris data untuk disimpan.")
+
+    return found_column
 
 
 def _load_metadata() -> dict:
@@ -114,67 +105,56 @@ def save_archive_copy(uploaded_bytes: bytes, nama_igt: str, original_filename: s
     return archive_path
 
 
-def _count_valid_rows(df: pd.DataFrame, prefix: str, level: str) -> int:
-    """Jumlah baris yang punya pasangan nama+kode terisi (bukan kosong) untuk satu level."""
-    name_col, code_col = get_name_col(prefix, level), get_code_col(prefix, level)
-    nama = df[name_col].astype(str).str.strip()
-    kode = df[code_col].astype(str).str.strip()
-    filled = df[name_col].notna() & df[code_col].notna() & (nama != "") & (kode != "") & (nama != "nan") & (kode != "nan")
-    return int(filled.sum())
+def update_active_ruleset(nama_igt: str, df: pd.DataFrame, found_column: str | None = None) -> Path:
+    """Timpa ruleset aktif untuk satu IGT dengan daftar nilai unik non-kosong dari kolom Rinci.
 
-
-def update_active_ruleset(nama_igt: str, df: pd.DataFrame) -> Path:
-    """Timpa seluruh ruleset aktif untuk satu IGT dengan isi df (4 level sekaligus).
-
+    `found_column` (nama kolom asli di df) bisa dioper langsung dari hasil
+    validate_ruleset_columns() supaya tidak dicari ulang; kalau tidak dioper, dicari lagi.
     Ruleset IGT lain di rules/active/ tidak disentuh.
     """
     prefix = get_prefix(nama_igt)
     if prefix is None:
         raise RulesValidationError(f"IGT '{nama_igt}' tidak terdaftar di konfigurasi.")
+    if found_column is None:
+        found_column = validate_ruleset_columns(df, nama_igt)
+
+    standard_column = get_ri_column(prefix)
+    raw_values = df[found_column].dropna().astype(str).str.strip()
+    valid_values = sorted({v for v in raw_values if v})
 
     active_path = RULES_ACTIVE_DIR / f"{slugify(nama_igt)}.csv"
-    df.to_csv(active_path, index=False, encoding="utf-8")
+    pd.DataFrame({standard_column: valid_values}).to_csv(active_path, index=False, encoding="utf-8")
 
     metadata = _load_metadata()
     metadata[nama_igt] = {
         "file": active_path.name,
         "prefix": prefix,
+        "column": standard_column,
         "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "jumlah_baris": {level: _count_valid_rows(df, prefix, level) for level in LEVELS},
+        "jumlah_nilai": len(valid_values),
     }
     _save_metadata(metadata)
     return active_path
 
 
-def load_active_ruleset(nama_igt: str) -> pd.DataFrame | None:
-    """Muat ruleset aktif (wide, 8 kolom) untuk satu IGT, atau None kalau belum ada."""
+def get_valid_ri_values(nama_igt: str) -> set[str] | None:
+    """Set nilai valid level Rinci untuk satu IGT, atau None kalau belum punya ruleset aktif."""
     metadata = _load_metadata()
     info = metadata.get(nama_igt)
     if not info:
         return None
+
     path = RULES_ACTIVE_DIR / info["file"]
     if not path.exists():
-        return None
-    return pd.read_csv(path, dtype=str)
-
-
-def get_valid_ri_values(nama_igt: str) -> set[str] | None:
-    """Set nilai valid level Rinci (kolom "[prefix]ObjRI") untuk satu IGT.
-
-    Kolom Besar/Menengah/Kecil di ruleset tetap tersimpan untuk referensi/dokumentasi,
-    tapi TIDAK dipakai di sini — validasi data spasial hanya di level Rinci (data
-    lapangan cuma punya kolom Rinci per IGT, tanpa kolom level lain). Mengembalikan
-    None kalau IGT belum punya ruleset aktif.
-    """
-    df = load_active_ruleset(nama_igt)
-    if df is None:
-        return None
-    prefix = get_prefix(nama_igt)
-    name_col = get_name_col(prefix, "RI")
-    if name_col not in df.columns:
         return set()
-    values = df[name_col].dropna().astype(str).str.strip()
-    return set(values[values != ""])
+
+    df = pd.read_csv(path, dtype=str)
+    column = info.get("column") or get_ri_column(info.get("prefix", ""))
+    if column not in df.columns:
+        return set()
+
+    values = df[column].dropna().astype(str).str.strip()
+    return set(v for v in values if v)
 
 
 def build_ri_ruleset_lookup(igt_list: list[dict] | None = None) -> dict[str, set[str]]:
@@ -190,7 +170,7 @@ def build_ri_ruleset_lookup(igt_list: list[dict] | None = None) -> dict[str, set
 
 
 def get_ruleset_summary(igt_list: list[dict] | None = None) -> pd.DataFrame:
-    """Tabel ringkasan ruleset per IGT: status, jumlah baris per level, terakhir diupdate."""
+    """Tabel ringkasan ruleset per IGT: kolom, status, jumlah nilai valid, terakhir diupdate."""
     igt_list = igt_list if igt_list is not None else load_igt_list()
     metadata = _load_metadata()
 
@@ -198,16 +178,12 @@ def get_ruleset_summary(igt_list: list[dict] | None = None) -> pd.DataFrame:
     for item in igt_list:
         nama_igt, prefix = item["nama_igt"], item["prefix"]
         info = metadata.get(nama_igt)
-        jumlah = info.get("jumlah_baris", {}) if info else {}
         rows.append(
             {
                 "Nama_IGT": nama_igt,
-                "Prefix": prefix,
+                "Kolom": get_ri_column(prefix),
                 "Status": "Ada" if info else "Belum Ada",
-                "Baris_KC": jumlah.get("KC", 0),
-                "Baris_MN": jumlah.get("MN", 0),
-                "Baris_BS": jumlah.get("BS", 0),
-                "Baris_RI": jumlah.get("RI", 0),
+                "Jumlah_Nilai_Valid": info.get("jumlah_nilai", 0) if info else 0,
                 "Terakhir_Diupdate": info.get("last_updated", "-") if info else "-",
             }
         )

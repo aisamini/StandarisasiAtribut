@@ -1,8 +1,9 @@
 """Validasi atribut data spasial IGT P4T level Rinci terhadap ruleset aktif.
 
 Data spasial P4T di lapangan hanya punya kolom level Rinci per IGT (mis. PTNOBJRI),
-jadi validasi HANYA mencocokkan kolom itu ke daftar nilai valid Rinci ("[prefix]ObjRI")
-di ruleset IGT terkait — kolom Besar/Menengah/Kecil di ruleset tidak dipakai untuk ini.
+jadi validasi HANYA mencocokkan kolom itu ke daftar nilai valid Rinci
+("[PREFIX]OBJRI", huruf besar) di ruleset IGT terkait. Nama kolom dicocokkan
+case-insensitive lalu distandarisasi ke huruf besar secara internal.
 
 Banyak file data spasial bisa digabung jadi satu dataset (dengan kolom SUMBER_FILE
 untuk pelacakan asal baris) sebelum divalidasi. Fuzzy matching (rapidfuzz) dihitung
@@ -82,20 +83,37 @@ def list_data_files() -> list[Path]:
     return [p for p in paths if not (p.suffix.lower() == ".dbf" and p.stem in shp_stems)]
 
 
-def load_and_merge_data_files(paths: list[Path]) -> pd.DataFrame:
+def _standardize_ri_column_names(df: pd.DataFrame, igt_list: list[dict] | None = None) -> pd.DataFrame:
+    """Ganti nama kolom Rinci yang terdeteksi (case-insensitive) jadi bentuk baku huruf besar.
+
+    Kolom lain (mis. NO_URUT, WADMKK) tidak disentuh. Memastikan file-file dengan
+    variasi huruf besar/kecil pada kolom Rinci yang sama tetap tergabung jadi satu
+    kolom saat digabung dengan pd.concat.
+    """
+    matches = detect_igt_ri_columns(df.columns, igt_list)
+    rename_map = {m["source_column"]: m["column"] for m in matches if m["source_column"] != m["column"]}
+    return df.rename(columns=rename_map) if rename_map else df
+
+
+def load_and_merge_data_files(paths: list[Path], igt_list: list[dict] | None = None) -> pd.DataFrame:
     """Baca banyak file data (Excel/DBF/CSV) lalu gabungkan jadi satu DataFrame.
 
+    Kolom Rinci di tiap file distandarisasi ke huruf besar (case-insensitive) supaya
+    file dengan variasi penulisan kolom yang sama tetap tergabung jadi satu kolom.
     Menambahkan kolom SUMBER_FILE (nama file asal tiap baris, untuk pelacakan) dan
     _ROW_ASAL (index baris di file asalnya, dipakai untuk menulis koreksi balik ke
     file yang tepat). File yang gagal dibaca dilewati.
     """
+    if igt_list is None:
+        igt_list = load_igt_list()
+
     frames = []
     for path in paths:
         try:
             df = read_attribute_table(path)
         except DataReadError:
             continue
-        df = df.reset_index(drop=True)
+        df = _standardize_ri_column_names(df, igt_list).reset_index(drop=True)
         df.insert(0, ROW_ASAL_COL, df.index)
         df.insert(0, SUMBER_FILE_COL, path.name)
         frames.append(df)

@@ -1,4 +1,9 @@
-"""Halaman Koreksi Data: koreksi per NILAI UNIK yang salah (bukan per baris), lalu verifikasi ulang."""
+"""Halaman Koreksi Data: koreksi per NILAI UNIK yang salah (bukan per baris), lalu verifikasi ulang.
+
+Beroperasi di atas dataset kerja aktif di st.session_state (dibuat lewat halaman
+Validasi Data, atau otomatis dimuat dari folder data/ kalau belum ada). Setelah
+koreksi diterapkan, dataset kerja diperbarui supaya halaman lain tetap konsisten.
+"""
 
 import sys
 from pathlib import Path
@@ -8,6 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import streamlit as st
 
 from app.core.rules_manager import build_ri_ruleset_lookup
+from app.core.session_state import (
+    SS_DATA_SOURCE,
+    SS_LAST_VERIFICATION,
+    SS_MERGED_DF,
+    SS_SUMBER_FILES,
+    SS_VALIDATION_RESULT,
+    init_working_dataset_state,
+    reset_working_dataset_state,
+)
 from app.core.validator import (
     apply_value_corrections,
     display_value,
@@ -15,10 +29,13 @@ from app.core.validator import (
     list_data_files,
     load_and_merge_data_files,
     split_and_write_back,
+    validate_merged_dataframe,
     verify_after_correction,
 )
 
 st.set_page_config(page_title="Koreksi Data - IGT P4T", page_icon="🛠️", layout="wide")
+
+init_working_dataset_state(st)
 
 st.title("Koreksi Data")
 st.write(
@@ -28,32 +45,48 @@ st.write(
     "semua file sumbernya. Klik **Terapkan Koreksi** untuk menyimpan ke data."
 )
 
+if st.button("🔄 Reset / Mulai Ulang"):
+    reset_working_dataset_state(st)
+    st.rerun()
+
 TIDAK_DIUBAH = "__tidak_diubah__"
 
-data_files = list_data_files()
-if not data_files:
-    st.warning("Belum ada file data di folder `data/`.")
-    st.stop()
+if st.session_state[SS_MERGED_DF] is None:
+    data_files = list_data_files()
+    if not data_files:
+        st.warning(
+            "Belum ada dataset kerja aktif dan folder `data/` juga kosong. Unggah file "
+            "di halaman **Validasi Data**, atau letakkan file di folder `data/`."
+        )
+        st.stop()
 
-merged_df = load_and_merge_data_files(data_files)
+    merged_df = load_and_merge_data_files(data_files)
+    lookup = build_ri_ruleset_lookup()
+    st.session_state[SS_MERGED_DF] = merged_df
+    st.session_state[SS_SUMBER_FILES] = sorted(merged_df["SUMBER_FILE"].unique().tolist())
+    st.session_state[SS_VALIDATION_RESULT] = validate_merged_dataframe(merged_df, ri_lookup=lookup)
+    st.session_state[SS_DATA_SOURCE] = "folder"
+
+merged_df = st.session_state[SS_MERGED_DF]
+sumber_files = st.session_state[SS_SUMBER_FILES]
+sumber_label = "folder `data/`" if st.session_state[SS_DATA_SOURCE] == "folder" else "upload manual"
+st.caption(f"Dataset kerja aktif ({sumber_label}): {len(sumber_files)} file, {len(merged_df)} record — {', '.join(sumber_files)}.")
+
 lookup = build_ri_ruleset_lookup()
 groups = get_invalid_value_groups(merged_df, ri_lookup=lookup)
 
-st.caption(f"{len(data_files)} file, {len(merged_df)} record total: {', '.join(p.name for p in data_files)}.")
-
-if "last_verification" in st.session_state:
-    verifikasi = st.session_state.pop("last_verification")
-    if verifikasi:
-        st.subheader("Hasil Verifikasi Setelah Koreksi Terakhir")
-        for (nama_igt, column), sisa in sorted(verifikasi.items()):
-            if sisa == 0:
-                st.success(f"{nama_igt} / `{column}`: semua nilai sudah cocok dengan ruleset. ✔")
-            else:
-                st.warning(f"{nama_igt} / `{column}`: masih ada **{sisa}** nilai unik yang belum cocok.")
-        st.divider()
+if st.session_state[SS_LAST_VERIFICATION] is not None:
+    verifikasi = st.session_state[SS_LAST_VERIFICATION]
+    st.subheader("Hasil Verifikasi Setelah Koreksi Terakhir")
+    for (nama_igt, column), sisa in sorted(verifikasi.items()):
+        if sisa == 0:
+            st.success(f"{nama_igt} / `{column}`: semua nilai sudah cocok dengan ruleset. ✔")
+        else:
+            st.warning(f"{nama_igt} / `{column}`: masih ada **{sisa}** nilai unik yang belum cocok.")
+    st.divider()
 
 if not groups:
-    st.success("Tidak ada nilai salah untuk kolom Rinci yang punya ruleset aktif di data ini.")
+    st.success("Tidak ada nilai salah untuk kolom Rinci yang punya ruleset aktif di dataset ini.")
     st.stop()
 
 st.subheader(f"Nilai Salah yang Perlu Dikoreksi ({len(groups)})")
@@ -116,10 +149,12 @@ if st.button("Terapkan Koreksi", type="primary"):
         corrected_df = apply_value_corrections(merged_df, corrections)
         saved = split_and_write_back(corrected_df)
 
-        reread_df = load_and_merge_data_files(list_data_files())
-        verifikasi = verify_after_correction(reread_df, ri_lookup=lookup)
+        verifikasi = verify_after_correction(corrected_df, ri_lookup=lookup)
 
-        st.session_state["last_verification"] = verifikasi
+        st.session_state[SS_MERGED_DF] = corrected_df
+        st.session_state[SS_VALIDATION_RESULT] = validate_merged_dataframe(corrected_df, ri_lookup=lookup)
+        st.session_state[SS_LAST_VERIFICATION] = verifikasi
+
         for group_key in list(st.session_state.keys()):
             if group_key.startswith("select_") or group_key.startswith("manual_"):
                 del st.session_state[group_key]

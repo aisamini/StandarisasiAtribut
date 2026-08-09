@@ -10,7 +10,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from app.core.igt_config import IgtConfigError, add_igt, load_igt_list
+from app.core.igt_config import IgtConfigError, add_igt, get_ri_column, get_prefix, load_igt_list
 from app.core.rules_manager import (
     RulesValidationError,
     build_template_for_igt,
@@ -24,9 +24,11 @@ st.set_page_config(page_title="Kelola Aturan - IGT P4T", page_icon="📋", layou
 
 st.title("Kelola Aturan")
 st.write(
-    "Pilih IGT, unduh template kolomnya (sesuai Permen ATR No. 1 Tahun 2025), lalu "
-    "unggah ruleset lengkap (4 level: Kecil/Menengah/Besar/Rinci) untuk IGT tersebut. "
-    "Upload baru untuk IGT yang sama akan MENGGANTI SELURUH ruleset IGT itu."
+    "Pilih IGT, unduh template kolom Rinci-nya, lalu unggah daftar nilai valid untuk "
+    "IGT tersebut. Sistem hanya mencari SATU kolom yang relevan (nama kolom tidak "
+    "case-sensitive) — kolom lain di file yang diunggah (mis. NO_URUT, WADMKK) "
+    "diabaikan, bukan dianggap error. Upload baru untuk IGT yang sama akan MENGGANTI "
+    "SELURUH ruleset IGT itu."
 )
 
 TAMBAH_IGT_BARU = "+ Tambah IGT Baru"
@@ -61,7 +63,7 @@ nama_igt = pilihan
 st.divider()
 
 st.subheader("2. Unduh Template")
-st.write(f"Template berisi 8 kolom baku untuk **{nama_igt}** (4 level, masing-masing kolom nama+kode).")
+st.write(f"Template berisi 1 kolom Rinci baku untuk **{nama_igt}**: `{get_ri_column(get_prefix(nama_igt))}`.")
 st.download_button(
     label=f"Download Template Excel — {nama_igt}",
     data=build_template_for_igt(nama_igt),
@@ -73,7 +75,7 @@ st.divider()
 
 st.subheader("3. Upload Ruleset")
 uploaded_file = st.file_uploader(
-    f"Pilih file Excel (.xlsx) berisi ruleset lengkap untuk {nama_igt}",
+    f"Pilih file Excel (.xlsx) berisi daftar nilai valid untuk {nama_igt}",
     type=["xlsx"],
     key=f"uploader_{nama_igt}",
 )
@@ -86,16 +88,16 @@ if uploaded_file is not None:
         st.error(f"Gagal membaca file Excel: {exc}")
     else:
         try:
-            validate_ruleset_columns(df, nama_igt)
+            found_column = validate_ruleset_columns(df, nama_igt)
         except RulesValidationError as exc:
             st.error(str(exc))
         else:
-            st.success("Format file valid dan sesuai template.")
+            st.success(f"Kolom '{found_column}' ditemukan dan akan dipakai sebagai daftar nilai valid.")
             st.dataframe(df, use_container_width=True, hide_index=True)
 
             if st.button("Simpan dan Terapkan Ruleset", type="primary"):
                 archive_path = save_archive_copy(file_bytes, nama_igt, uploaded_file.name)
-                update_active_ruleset(nama_igt, df)
+                update_active_ruleset(nama_igt, df, found_column)
                 st.success(
                     f"Ruleset untuk **{nama_igt}** berhasil diperbarui (menggantikan ruleset lama). "
                     f"Arsip disimpan di rules/archive/{archive_path.name}."
