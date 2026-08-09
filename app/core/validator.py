@@ -45,6 +45,16 @@ class CategoryValidationResult:
     attributes_not_in_data: list[str] = field(default_factory=list)
 
 
+@dataclass
+class InvalidRecord:
+    """Satu record (baris + atribut) yang nilainya terdeteksi salah, siap dikoreksi."""
+
+    row_index: int
+    attribute: str
+    current_value: str
+    candidates: list[dict[str, float | str]] = field(default_factory=list)
+
+
 def build_rules_lookup() -> dict[str, dict[str, set[str]]]:
     """Baca seluruh ruleset aktif dari rules/active/ (gabungan semua kategori).
 
@@ -91,6 +101,15 @@ def get_top_suggestions(
     ]
 
 
+def _values_and_invalid_mask(df: pd.DataFrame, attribute: str, valid_values: set[str]):
+    """Nilai kolom sebagai string (NaN -> label kosong) dan mask baris yang invalid."""
+    values_as_str = df[attribute].apply(
+        lambda v: EMPTY_VALUE_LABEL if pd.isna(v) else str(v).strip()
+    )
+    is_invalid = ~values_as_str.isin(valid_values)
+    return values_as_str, is_invalid
+
+
 def validate_dataframe_against_rules(
     df: pd.DataFrame,
     category: str,
@@ -116,10 +135,7 @@ def validate_dataframe_against_rules(
             attributes_not_in_data.append(attribute)
             continue
 
-        values_as_str = df[attribute].apply(
-            lambda v: EMPTY_VALUE_LABEL if pd.isna(v) else str(v).strip()
-        )
-        is_invalid = ~values_as_str.isin(valid_values)
+        values_as_str, is_invalid = _values_and_invalid_mask(df, attribute, valid_values)
         error_count = int(is_invalid.sum())
         invalid_value_counts = values_as_str[is_invalid].value_counts().to_dict()
 
@@ -142,6 +158,41 @@ def validate_dataframe_against_rules(
         attribute_results=attribute_results,
         attributes_not_in_data=attributes_not_in_data,
     )
+
+
+def get_invalid_records(
+    df: pd.DataFrame,
+    category: str,
+    lookup: dict[str, dict[str, set[str]]] | None = None,
+) -> list[InvalidRecord]:
+    """Daftar record (baris + atribut) yang nilainya salah, siap ditampilkan di UI koreksi.
+
+    Setiap InvalidRecord menyimpan row_index asli (index df) sehingga koreksi bisa
+    ditulis balik ke baris yang tepat, beserta top-3 kandidat pengganti dari rapidfuzz.
+    """
+    if lookup is None:
+        lookup = build_rules_lookup()
+
+    attribute_rules = lookup.get(category, {})
+    records: list[InvalidRecord] = []
+
+    for attribute, valid_values in attribute_rules.items():
+        if attribute not in df.columns:
+            continue
+
+        values_as_str, is_invalid = _values_and_invalid_mask(df, attribute, valid_values)
+        for row_index in df.index[is_invalid]:
+            current_value = values_as_str.loc[row_index]
+            records.append(
+                InvalidRecord(
+                    row_index=int(row_index),
+                    attribute=attribute,
+                    current_value=current_value,
+                    candidates=get_top_suggestions(current_value, valid_values),
+                )
+            )
+
+    return records
 
 
 def _find_data_file_for_category(category: str) -> Path | None:

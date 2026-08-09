@@ -18,6 +18,10 @@ class ColumnStructureError(Exception):
     """Dilempar saat struktur kolom tabel atribut tidak sesuai dengan yang diharapkan."""
 
 
+class DataWriteError(Exception):
+    """Dilempar saat hasil koreksi tidak bisa ditulis langsung ke format file aslinya."""
+
+
 SUPPORTED_EXTENSIONS = (".dbf", ".shp", ".csv")
 
 
@@ -127,3 +131,29 @@ def load_and_validate_attribute_table(
     df = read_attribute_table(path)
     validate_column_structure(df, expected_columns, source_name=path.name)
     return df
+
+
+def write_csv(path: str | Path, df: pd.DataFrame) -> Path:
+    """Tulis DataFrame ke file .csv."""
+    path = Path(path)
+    df.to_csv(path, index=False)
+    return path
+
+
+def write_attribute_table(path: str | Path, df: pd.DataFrame) -> Path:
+    """Tulis DataFrame kembali ke file sesuai format aslinya.
+
+    Hanya .csv yang didukung untuk ditulis langsung. Untuk .dbf/.shp,
+    melempar DataWriteError dengan pesan jelas — pemanggil disarankan
+    menyimpan hasil koreksi sebagai file .csv baru sebagai gantinya.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+
+    if suffix == ".csv":
+        return write_csv(path, df)
+
+    raise DataWriteError(
+        f"Menyimpan langsung ke format '{suffix}' belum didukung. "
+        "Simpan hasil koreksi sebagai file .csv baru sebagai gantinya."
+    )
