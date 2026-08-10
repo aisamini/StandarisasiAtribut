@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.config import RULES_ACTIVE_DIR, RULES_ARCHIVE_DIR, RULES_METADATA_PATH
+from app.config import RULES_ACTIVE_DIR, RULES_ARCHIVE_DIR, RULES_METADATA_PATH, RULES_PRESETS_DIR
 from app.core.igt_config import get_prefix, get_ri_column, load_igt_list, slugify
 
 EXAMPLE_VALUES = ["Contoh Kategori Rinci 1", "Contoh Kategori Rinci 2"]
@@ -135,6 +135,68 @@ def update_active_ruleset(nama_igt: str, df: pd.DataFrame, found_column: str | N
     }
     _save_metadata(metadata)
     return active_path
+
+
+def get_preset_dir(nama_igt: str) -> Path:
+    """Folder preset klasifikasi resmi bawaan untuk satu IGT: rules/presets/<slug_igt>/."""
+    return RULES_PRESETS_DIR / slugify(nama_igt)
+
+
+def list_presets(nama_igt: str) -> list[dict]:
+    """Daftar preset klasifikasi resmi bawaan yang tersedia untuk satu IGT.
+
+    Dibaca dari file .xlsx di rules/presets/<slug_igt>/ — bukan hardcode di Python,
+    supaya preset bisa ditambah/diganti cukup dengan menaruh file baru di folder itu.
+    Mengembalikan list kosong (bukan error) kalau foldernya belum ada/masih kosong.
+    Tiap entri: {"filename": nama file asli, "label": label untuk ditampilkan di
+    dropdown (nama file tanpa ekstensi, underscore jadi spasi), "path": Path lengkap}.
+    """
+    preset_dir = get_preset_dir(nama_igt)
+    if not preset_dir.exists():
+        return []
+
+    return [
+        {"filename": path.name, "label": path.stem.replace("_", " "), "path": path}
+        for path in sorted(preset_dir.glob("*.xlsx"))
+    ]
+
+
+def get_preset_preview(nama_igt: str, filename: str) -> dict:
+    """Baca sekilas 1 file preset: kolom yang ditemukan, jumlah baris, jumlah nilai valid unik.
+
+    Dipakai supaya user bisa lihat isinya sebelum diterapkan (bukan kotak hitam).
+    Melempar RulesValidationError (pesan sama seperti validasi upload) kalau kolom
+    Rinci yang relevan tidak ditemukan di file preset ini.
+    """
+    path = get_preset_dir(nama_igt) / filename
+    df = pd.read_excel(path, dtype=str)
+    found_column = validate_ruleset_columns(df, nama_igt)
+    raw_values = df[found_column].dropna().astype(str).str.strip()
+    jumlah_nilai_valid = len({v for v in raw_values if v})
+    return {"kolom": found_column, "jumlah_baris": len(df), "jumlah_nilai_valid": jumlah_nilai_valid}
+
+
+def apply_preset(nama_igt: str, filename: str) -> tuple[Path, Path]:
+    """Terapkan preset klasifikasi resmi jadi ruleset aktif untuk satu IGT.
+
+    Mengikuti alur yang sama persis dengan upload manual: file preset diarsipkan
+    bertimestamp lewat save_archive_copy(), lalu jadi ruleset aktif lewat
+    update_active_ruleset() — logika arsip & penyimpanan ruleset aktif TIDAK
+    diduplikasi, cuma sumber filenya beda (baca dari rules/presets/ bukan dari
+    upload). Ruleset IGT lain tidak disentuh. Mengembalikan (archive_path, active_path).
+    """
+    preset_dir = get_preset_dir(nama_igt)
+    path = preset_dir / filename
+    if not path.exists():
+        raise RulesValidationError(f"Preset '{filename}' tidak ditemukan untuk IGT '{nama_igt}'.")
+
+    preset_bytes = path.read_bytes()
+    df = pd.read_excel(path, dtype=str)
+    found_column = validate_ruleset_columns(df, nama_igt)
+
+    archive_path = save_archive_copy(preset_bytes, nama_igt, filename)
+    active_path = update_active_ruleset(nama_igt, df, found_column)
+    return archive_path, active_path
 
 
 def get_valid_ri_values(nama_igt: str) -> set[str] | None:

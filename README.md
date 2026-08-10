@@ -23,7 +23,8 @@ prefix-nya dikonfigurasi di `rules/igt_config.json` dan bisa ditambah lewat UI
 data/               Input data spasial (DBF/SHP/CSV/XLSX) yang akan divalidasi
 rules/igt_config.json  Daftar IGT (nama + prefix kolom) — sumber kebenaran validasi
 rules/active/       Ruleset yang sedang dipakai, satu file CSV berisi daftar nilai valid per IGT
-rules/archive/      Arsip riwayat upload ruleset, bertimestamp
+rules/archive/      Arsip riwayat upload/penerapan ruleset, bertimestamp
+rules/presets/      Klasifikasi resmi bawaan (Juknis/Permen) siap pakai, per IGT
 app/                Logika utama aplikasi (Streamlit)
   Home.py           Halaman utama
   pages/            Halaman-halaman tambahan (mis. Kelola Aturan)
@@ -49,17 +50,46 @@ streamlit run app/Home.py
 
 ## Halaman Kelola Aturan
 
-Halaman `Kelola Aturan` (di sidebar) memungkinkan:
+Halaman `Kelola Aturan` (di sidebar): pilih IGT, lalu isi rulesetnya lewat salah satu
+dari dua tab berikut (keduanya berujung ke mekanisme arsip + ruleset aktif yang sama).
 
-1. Memilih IGT dari daftar terkonfigurasi, atau menambah IGT baru (nama + prefix kolom).
-2. Mengunduh template Excel khusus IGT yang dipilih (1 kolom Rinci baku, plus contoh nilai).
-3. Mengunggah daftar nilai valid untuk IGT tersebut — sistem hanya mencari SATU kolom
+**Tab "Gunakan Klasifikasi Resmi"** (jalur utama, disarankan untuk kebanyakan user) —
+pilih dari dropdown klasifikasi resmi bawaan (lihat "Klasifikasi Resmi Bawaan" di bawah)
+dan klik **Terapkan**. Tidak perlu download-edit-upload.
+
+**Tab "Upload Aturan Kustom"** (untuk revisi/aturan baru yang belum ada di daftar resmi):
+
+1. Mengunduh template Excel khusus IGT yang dipilih (1 kolom Rinci baku, plus contoh nilai).
+2. Mengunggah daftar nilai valid untuk IGT tersebut — sistem hanya mencari SATU kolom
    yang relevan (case-insensitive), kolom lain di file (mis. `NO_URUT`, `WADMKK`) diabaikan.
    Validasi hanya gagal kalau kolom itu benar-benar tidak ditemukan di file.
-4. Jika valid, file diarsipkan (bertimestamp + nama IGT) ke `rules/archive/`, lalu ruleset
-   aktif IGT itu **digantikan seluruhnya** (IGT lain tidak berubah).
-5. Menampilkan tabel ringkasan ruleset per IGT: kolom, status ada/belum, jumlah nilai
-   valid, dan tanggal terakhir diupdate.
+
+Kedua jalur di atas: file yang diterapkan diarsipkan (bertimestamp + nama IGT) ke
+`rules/archive/`, lalu ruleset aktif IGT itu **digantikan seluruhnya** (IGT lain tidak
+berubah). Bagian bawah halaman menampilkan tabel ringkasan ruleset per IGT: kolom,
+status ada/belum, jumlah nilai valid, dan tanggal terakhir diupdate.
+
+### Klasifikasi Resmi Bawaan
+
+File Excel klasifikasi resmi (Juknis/Permen) ditaruh di `rules/presets/<slug_igt>/`,
+satu folder per IGT — **bukan** hardcode di kode Python, jadi bisa ditambah/diganti
+tanpa ubah kode. `<slug_igt>` mengikuti nama IGT dengan spasi diganti underscore
+(fungsi `slugify()` di `app/core/igt_config.py`); untuk 4 IGT bawaan:
+
+```
+rules/presets/Penggunaan_Tanah/
+rules/presets/Pemanfaatan_Tanah/
+rules/presets/Pemilikan_Tanah/
+rules/presets/Penguasaan_Tanah/
+```
+
+Taruh file `.xlsx`-nya langsung di folder yang sesuai. Nama file jadi label yang
+ditampilkan di dropdown (underscore diganti spasi) — pakai nama yang deskriptif &
+konsisten, mis. `Permen_ATR_No1_2025.xlsx` → tampil sebagai "Permen ATR No1 2025".
+Isi file mengikuti format yang sama seperti template upload manual: 1 kolom dengan
+nama sesuai IGT-nya (mis. `PTNOBJRI` untuk Penggunaan Tanah, case-insensitive), berisi
+daftar nilai valid level Rinci. Boleh ada lebih dari satu file per folder (mis. untuk
+versi/revisi berbeda) — semuanya akan muncul sebagai pilihan terpisah di dropdown.
 
 ## Validasi Data & Koreksi
 
